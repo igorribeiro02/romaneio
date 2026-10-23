@@ -1,5 +1,5 @@
 /* Service worker: abre o app sem internet e guarda os pedaços de mapa já vistos. */
-const VERSION = 'romaneio-v1';
+const VERSION = 'romaneio-v2';
 const SHELL = [
   './', './index.html', './core.js', './app.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png',
@@ -28,7 +28,7 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
 
   // Mapa: usa o que já tem e atualiza em segundo plano
-  if (url.hostname.endsWith('basemaps.cartocdn.com')) {
+  if (url.hostname === 'tile.openstreetmap.org' || url.hostname === 'server.arcgisonline.com') {
     e.respondWith(caches.open(TILE_CACHE).then(async c => {
       const hit = await c.match(e.request);
       const net = fetch(e.request).then(r => { if (r.ok || r.type === 'opaque') { c.put(e.request, r.clone()); trimTiles(); } return r; }).catch(() => hit);

@@ -272,14 +272,15 @@
       else if (pc.slice(0, 5) === query.cep.slice(0, 5)) { score += 0.08; reasons.push('CEP parcial'); }
     }
     if (query.bairro && cand.district && jaroWinkler(query.bairro, cand.district) >= 0.88) { score += 0.08; reasons.push('bairro'); }
-    if (query.city && cand.city) {
+    if (query.city && cand.city && !/regiao|metropolitana|mesorregiao|microrregiao/.test(norm(cand.city))) {
       if (jaroWinkler(query.city, cand.city) >= 0.88) score += 0.04;
       else score -= 0.25;
     }
     if (query.anchor && Number.isFinite(cand.lat)) {
       const d = haversineKm(query.anchor, cand);
       if (query.tight) { // âncora é o centro do bairro: rua com o mesmo nome em outro bairro perde pontos
-        if (d > 5) score -= 0.35; else if (d > 2.5) score -= 0.12; else score += 0.04;
+        // bairros grandes (Piratininga, Itaipu, Engenho do Mato) passam de 5 km de ponta a ponta
+        if (d > 9) score -= 0.3; else if (d > 4.5) score -= 0.06; else score += 0.04;
       } else if (d > 25) score -= 0.35; else if (d > 10) score -= 0.12;
     }
     if (cand.type === 'house' && reasons.includes('número')) score += 0.04;

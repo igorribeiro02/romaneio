@@ -126,6 +126,8 @@ button { cursor: pointer; }
 #mapScreen { position: fixed; inset: 0; }
 #map { position: absolute; inset: 0; background: var(--surface-2); }
 .leaflet-container { font-family: var(--font-body); }
+/* modo escuro: escurece o mapa claro do OpenStreetMap sem precisar de outro provedor */
+.tiles-dark { filter: invert(1) hue-rotate(180deg) brightness(.95) contrast(.9); }
 .leaflet-control-attribution { background: var(--surface) !important; color: var(--muted) !important; }
 .leaflet-control-attribution a { color: var(--accent) !important; }
 .topbar {

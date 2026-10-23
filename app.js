@@ -115,7 +115,8 @@
       const p = f.properties, [lng, lat] = f.geometry.coordinates;
       const street = p.street || ((p.type === 'street' || p.osm_key === 'highway') ? p.name : '');
       return { lat, lng, street, name: p.name, housenumber: p.housenumber, postcode: p.postcode,
-        district: p.district || p.locality || p.suburb || '', city: p.city || p.county || '', type: p.type };
+        // "county" no Brasil costuma ser a região imediata, não a cidade: não usar como cidade
+        district: p.district || p.locality || p.suburb || '', city: p.city || '', type: p.type };
     });
   }
   function nominatimCands(arr) {
@@ -502,11 +503,7 @@
     if (!S.map) {
       S.map = L.map('map', { zoomControl: false, attributionControl: true, tap: true }).setView([-22.9, -43.1], 12);
       const dark = window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches;
-      L.tileLayer(dark ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-        : 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-        maxZoom: 20, subdomains: 'abcd',
-        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> © <a href="https://carto.com/attributions">CARTO</a>'
-      }).addTo(S.map);
+      addBaseMap(dark);
       S.map.on('click', onMapClick);
       // quando o motorista mexe no mapa, a busca para de reenquadrar a visão sozinha
       S.map.on('dragstart', () => { S.userMoved = true; });
@@ -515,6 +512,26 @@
     S.markers.forEach(m => m.remove()); S.markers.clear();
     drawZones();
     setTimeout(() => S.map.invalidateSize(), 50);
+  }
+
+  // Mapa de fundo: OpenStreetMap (aberto, sem chave). Se falhar muito, troca sozinho para o Esri.
+  const BASEMAPS = [
+    { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png', opts: { maxZoom: 19,
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>' } },
+    { url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', opts: { maxZoom: 19,
+      attribution: 'Tiles © Esri · © OpenStreetMap' } }
+  ];
+  function addBaseMap(dark, idx) {
+    idx = idx || 0;
+    if (S.base) S.base.remove();
+    const b = BASEMAPS[idx];
+    let errors = 0, loaded = 0;
+    S.base = L.tileLayer(b.url, Object.assign({ className: dark ? 'tiles-dark' : '' }, b.opts)).addTo(S.map);
+    S.base.on('tileload', () => { loaded++; });
+    S.base.on('tileerror', () => {
+      errors++;
+      if (errors >= 4 && errors > loaded && idx + 1 < BASEMAPS.length) addBaseMap(dark, idx + 1);
+    });
   }
 
   function pinClass(s) {
