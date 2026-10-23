@@ -196,8 +196,13 @@
   }
 
   // Chave estável para cache e para agrupar pacotes do mesmo endereço.
+  // "Ponta D Areia", "Ponta DAreia", "Ponta Dareia" e "Ponta da Areia" viram a mesma chave
+  function bairroKey(b) {
+    return norm(b).replace(/\b(d|da|de|do|das|dos|e)\b/g, ' ').replace(/\s+/g, '').replace(/^(.*)d(?=areia|agua|ouro)/, '$1');
+  }
+
   function addressKey(p) {
-    return [norm(p.street), p.number || 's/n', p.cep || norm(p.bairro), norm(p.city)].join('|');
+    return [norm(p.street), p.number || 's/n', p.cep || bairroKey(p.bairro), norm(p.city)].join('|');
   }
 
   // ---------- Similaridade ----------
@@ -457,6 +462,173 @@
     };
   }
 
+  // ---------- Malha de ruas (OpenStreetMap) e numeração ----------
+  // No Brasil o número da casa costuma ser a distância em metros desde o início da rua.
+  // Então, com a geometria da rua, dá para colocar o 469 a ~469 m do começo dela.
+  const keyPt = p => p[0].toFixed(6) + ',' + p[1].toFixed(6);
+  function segKm(a, b) { return haversineKm({ lat: a[0], lng: a[1] }, { lat: b[0], lng: b[1] }); }
+
+  function makeChain(name, pts) {
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + segKm(pts[i - 1], pts[i]) * 1000);
+    return { name, pts, cum, len: cum[cum.length - 1] };
+  }
+
+  // ways: [{id, n: nome, g: [[lat,lng],...]}] → trechos contínuos por nome
+  function buildChains(ways) {
+    const byName = new Map();
+    for (const w of ways) {
+      if (!w.n || !w.g || w.g.length < 2) continue;
+      const k = norm(expandAbbrev(w.n));
+      if (!byName.has(k)) byName.set(k, []);
+      byName.get(k).push(w);
+    }
+    const chains = [];
+    for (const list of byName.values()) {
+      const name = list[0].n;
+      const adj = new Map();
+      list.forEach((w, i) => {
+        for (const end of [0, 1]) {
+          const k = keyPt(end ? w.g[w.g.length - 1] : w.g[0]);
+          if (!adj.has(k)) adj.set(k, []);
+          adj.get(k).push(i);
+        }
+      });
+      const used = new Set();
+      const pieces = [];
+      while (used.size < list.length) {
+        // começa por uma ponta (nó com um trecho só) ainda livre
+        let startNode = null;
+        for (const [k, ids] of adj) { const free = ids.filter(i => !used.has(i)); if (free.length === 1) { startNode = k; break; } }
+        if (!startNode) { const i = list.findIndex((_, j) => !used.has(j)); startNode = keyPt(list[i].g[0]); }
+        let node = startNode, pts = null;
+        for (;;) {
+          const next = (adj.get(node) || []).find(i => !used.has(i));
+          if (next == null) break;
+          used.add(next);
+          const g = list[next].g;
+          const forward = keyPt(g[0]) === node;
+          const seg = forward ? g : g.slice().reverse();
+          pts = pts ? pts.concat(seg.slice(1)) : seg.slice();
+          node = keyPt(seg[seg.length - 1]);
+        }
+        if (pts && pts.length > 1) pieces.push(pts);
+      }
+      // junta pedaços do mesmo nome separados por menos de 40 m (praça, canteiro)
+      let merged = true;
+      while (merged && pieces.length > 1) {
+        merged = false;
+        outer: for (let i = 0; i < pieces.length; i++) {
+          for (let j = i + 1; j < pieces.length; j++) {
+            const a = pieces[i], b = pieces[j];
+            const opts = [[a[a.length - 1], b[0], () => a.concat(b)], [a[a.length - 1], b[b.length - 1], () => a.concat(b.slice().reverse())],
+              [a[0], b[b.length - 1], () => b.concat(a)], [a[0], b[0], () => b.slice().reverse().concat(a)]];
+            for (const [p, q, join] of opts) {
+              if (segKm(p, q) < 0.04) { pieces[i] = join(); pieces.splice(j, 1); merged = true; break outer; }
+            }
+          }
+        }
+      }
+      pieces.forEach(pts => chains.push(makeChain(name, pts)));
+    }
+    return chains;
+  }
+
+  // Ponto a "m" metros do início (ou do fim), afastado 7 m para o lado do número (ímpar/par)
+  function positionOnChain(chain, meters, fromEnd, number) {
+    let m = Math.max(0, Math.min(chain.len, fromEnd ? chain.len - meters : meters));
+    const { pts, cum } = chain;
+    let i = 1;
+    while (i < cum.length - 1 && cum[i] < m) i++;
+    const a = pts[i - 1], b = pts[i];
+    const segLen = cum[i] - cum[i - 1] || 1;
+    const f = Math.max(0, Math.min(1, (m - cum[i - 1]) / segLen));
+    let lat = a[0] + (b[0] - a[0]) * f, lng = a[1] + (b[1] - a[1]) * f;
+    if (number) {
+      const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 110540;
+      let dx = (b[1] - a[1]) * kx, dy = (b[0] - a[0]) * ky;
+      if (fromEnd) { dx = -dx; dy = -dy; }
+      const L = Math.hypot(dx, dy) || 1;
+      const side = (+number % 2 === 1) ? 1 : -1; // ímpar à esquerda de quem anda no sentido da numeração
+      const off = 7 * side;
+      lat += (dx / L) * off / ky;
+      lng += (-dy / L) * off / kx;
+    }
+    return { lat, lng };
+  }
+
+  function nearestOnChainKm(chain, p) {
+    let best = Infinity;
+    for (const q of chain.pts) { const d = haversineKm(p, { lat: q[0], lng: q[1] }); if (d < best) best = d; }
+    return best;
+  }
+
+  // Candidatos de local para uma parada a partir da malha de ruas da região.
+  // ctx: {bairroCenter, downtown}
+  function streetCandidates(stop, chains, ctx) {
+    const out = [];
+    if (!stop.street) return out;
+    const sType = STREET_TYPES.includes(norm(stop.street).split(' ')[0]) ? norm(stop.street).split(' ')[0] : '';
+    for (const c of chains) {
+      const sim = streetSimilarity(stop.street, c.name);
+      if (sim < 0.88) continue;
+      const cn = norm(expandAbbrev(c.name)).split(' ');
+      const cType = STREET_TYPES.includes(cn[0]) ? cn[0] : '';
+      const typePenalty = sType && cType && sType !== cType ? 0.2 : 0;
+      const num = stop.number ? +stop.number : null;
+      // sentido da numeração: começa na ponta mais perto do centro da cidade (com dúvida, testa os dois)
+      const p0 = { lat: c.pts[0][0], lng: c.pts[0][1] }, p1 = { lat: c.pts[c.pts.length - 1][0], lng: c.pts[c.pts.length - 1][1] };
+      const startIsFirst = ctx.downtown ? haversineKm(ctx.downtown, p0) <= haversineKm(ctx.downtown, p1) : true;
+      const dirs = num ? [false, true] : [false];
+      for (const fromEnd of dirs) {
+        const pos = num ? positionOnChain(c, num, fromEnd, stop.number) : positionOnChain(c, c.len / 2, false, null);
+        let score = sim - typePenalty;
+        if (ctx.bairroCenter) {
+          const d = Math.min(haversineKm(ctx.bairroCenter, pos), nearestOnChainKm(c, ctx.bairroCenter) + 0.5);
+          // o bairro do romaneio é o sinal mais forte que temos sem CEP
+          score += d <= 1.5 ? 0.06 : d <= 3 ? -0.1 : d <= 6 ? -0.4 : -0.7;
+        }
+        const inRange = num ? num <= c.len * 1.15 + 20 : false;
+        if (num) score += inRange ? 0.03 : -0.15; else score -= 0.12;
+        const natural = (fromEnd ? !startIsFirst : startIsFirst);
+        if (num && !natural) score -= 0.06;
+        score = Math.max(0.02, Math.min(1.15, score));
+        out.push({ lat: pos.lat, lng: pos.lng, score, src: 'rua', inRange, street: c.name });
+      }
+    }
+    return out.sort((a, b) => b.score - a.score).slice(0, 8);
+  }
+
+  // Viterbi: escolhe, para cada parada, o candidato que equilibra "texto bate" com
+  // "fica perto da parada anterior e da próxima" (a rota da Shopee anda em sequência).
+  // cands[t] = [{lat, lng, score}] na ordem da rota. Devolve o índice escolhido em cada t.
+  function viterbi(cands, lambda) {
+    lambda = lambda == null ? 0.3 : lambda;
+    const n = cands.length;
+    if (!n) return [];
+    const em = c => Math.log(Math.max(0.01, c.score));
+    let prev = cands[0].map(em);
+    const back = [];
+    for (let t = 1; t < n; t++) {
+      const cur = [], bp = [];
+      for (const c of cands[t]) {
+        let best = -Infinity, bi = 0;
+        for (let j = 0; j < cands[t - 1].length; j++) {
+          const v = prev[j] - lambda * Math.min(haversineKm(cands[t - 1][j], c), 4);
+          if (v > best) { best = v; bi = j; }
+        }
+        cur.push(best + em(c)); bp.push(bi);
+      }
+      prev = cur; back.push(bp);
+    }
+    const pick = new Array(n);
+    let bi = 0;
+    prev.forEach((v, i) => { if (v > prev[bi]) bi = i; });
+    pick[n - 1] = bi;
+    for (let t = n - 1; t > 0; t--) { bi = back[t - 1][bi]; pick[t - 1] = bi; }
+    return pick;
+  }
+
   function pointInCircle(p, zone) {
     return haversineKm(p, zone) * 1000 <= zone.radius;
   }
@@ -465,7 +637,7 @@
     stripAccents, norm, normRouteCode, detectColumns, findHeaderRow, parseNum, fixCoord, inBrazil,
     expandAbbrev, parseAddress, cleanCep, addressKey, jaroWinkler, streetSimilarity, haversineKm,
     centroid, median, scoreCandidate, confidenceFromScore, findOutliers, optimizeOrder, routeLengthKm,
-    buildRoute, pointInCircle, listRoutes, cleanBairro
+    buildRoute, pointInCircle, listRoutes, cleanBairro, buildChains, positionOnChain, streetCandidates, viterbi, bairroKey
   };
   root.RomCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

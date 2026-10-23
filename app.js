@@ -9,7 +9,7 @@
     get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
     set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } }
   };
-  const K = { geo: 'rm.geo.v3', fix: 'rm.fix.v1', cep: 'rm.cep.v1', zones: 'rm.zones.v1', last: 'rm.last.v2', done: 'rm.done.', place: 'rm.place.v1' };
+  const K = { geo: 'rm.geo.v4', fix: 'rm.fix.v1', cep: 'rm.cep.v1', zones: 'rm.zones.v1', last: 'rm.last.v2', done: 'rm.done.', place: 'rm.place.v2' };
   // Centros conhecidos para começar a busca sem esperar a rede
   const CITY_SEED = {
     'niteroi': { lat: -22.8950, lng: -43.0900 },
@@ -76,7 +76,7 @@
   }
 
   // Centro de cidade e de bairro (um pedido por bairro da rota, guardado para sempre)
-  const placeKey = (bairro, city) => C.norm(bairro) + '|' + C.norm(city);
+  const placeKey = (bairro, city) => C.bairroKey(bairro) + '|' + C.norm(city);
   function cityCenter(city) {
     const k = C.norm(city);
     return CITY_SEED[k] || S.places['|' + k] || null;
@@ -146,13 +146,10 @@
     return { street, number: s.number, cep: s.cep, bairro, city, anchor, tight, box: cityCenter(city) || anchor };
   }
 
-  function pickBest(q, cands) {
-    let best = null;
-    for (const c of cands) {
-      const sc = C.scoreCandidate(q, c);
-      if (!best || sc.score > best.score) best = Object.assign({ cand: c }, sc);
-    }
-    return best;
+  // Candidatos pontuados (os melhores primeiro), para o Viterbi escolher depois
+  function pickTop(q, cands, min) {
+    return cands.map(c => { const sc = C.scoreCandidate(q, c); return { lat: c.lat, lng: c.lng, score: sc.score, src: 'busca' }; })
+      .filter(c => c.score >= (min || 0.45)).sort((a, b) => b.score - a.score).slice(0, 4);
   }
 
   function photonURL(text, q) {
@@ -164,22 +161,20 @@
   }
   async function geocodePhoton(s) {
     const q = buildQuery(s);
-    if (!q.street && !q.cep) return null;
-    // 1ª tentativa: rua + número + bairro + cidade
+    if (!q.street && !q.cep) return [];
     const t1 = [q.street, q.number].filter(Boolean).join(' ') + (q.bairro || q.city ? ', ' + [q.bairro, q.city].filter(Boolean).join(', ') : '');
-    let best = pickBest(q, photonCands(await fetchJSON(photonURL(t1 || q.cep, q), 8000)));
-    // 2ª tentativa só se ficou fraco: rua + cidade (às vezes o bairro do romaneio não bate com o do mapa)
-    if ((!best || best.score < 0.8) && q.street) {
-      const b2 = pickBest(q, photonCands(await fetchJSON(photonURL([q.street, q.number].filter(Boolean).join(' ') + (q.city ? ', ' + q.city : ''), q), 8000)));
-      if (b2 && (!best || b2.score > best.score)) best = b2;
+    let list = pickTop(q, photonCands(await fetchJSON(photonURL(t1 || q.cep, q), 8000)));
+    if ((!list.length || list[0].score < 0.8) && q.street) {
+      const t2 = [q.street, q.number].filter(Boolean).join(' ') + (q.city ? ', ' + q.city : '');
+      list = list.concat(pickTop(q, photonCands(await fetchJSON(photonURL(t2, q), 8000))));
     }
-    return { q, best };
+    return list.sort((a, b) => b.score - a.score).slice(0, 5);
   }
 
   let lastNominatim = 0;
   async function geocodeNominatim(s) {
     const q = buildQuery(s);
-    if (!q.street) return null;
+    if (!q.street) return [];
     const wait = lastNominatim + 1100 - Date.now(); // regra de uso: 1 pedido por segundo
     if (wait > 0) await sleep(wait);
     lastNominatim = Date.now();
@@ -188,7 +183,7 @@
     if (q.city) params.set('city', q.city);
     if (q.cep) params.set('postalcode', q.cep.slice(0, 5) + '-' + q.cep.slice(5));
     const arr = await fetchJSON('https://nominatim.openstreetmap.org/search?' + params, 9000);
-    return { q, best: pickBest(q, nominatimCands(arr)) };
+    return pickTop(q, nominatimCands(arr));
   }
 
   function setLoc(s, lat, lng, conf, src) {
@@ -208,128 +203,201 @@
     store.set(K.cep, S.cepCache);
   }
 
-  // ---------- O algoritmo de localização em etapas ----------
+  // ---------- Malha de ruas da região (OpenStreetMap via Overpass) ----------
+  // Baixada em quadrados de ~2 km e guardada no celular (IndexedDB). Com o tempo o hub
+  // inteiro fica salvo e a localização passa a funcionar quase sem internet.
+  const CELL = 0.02;
+  const CITY_DOWNTOWN = { 'niteroi': { lat: -22.8950, lng: -43.1235 }, 'sao goncalo': { lat: -22.8268, lng: -43.0634 } };
+  let idbP = null;
+  function idb() {
+    if (!idbP) idbP = new Promise((res, rej) => {
+      try {
+        const r = indexedDB.open('romaneio', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('cells', { keyPath: 'k' });
+        r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+      } catch (e) { rej(e); }
+    });
+    return idbP;
+  }
+  async function idbGet(keys) {
+    try {
+      const db = await idb();
+      return await new Promise(res => {
+        const tx = db.transaction('cells', 'readonly'), st = tx.objectStore('cells'), out = {};
+        keys.forEach(k => { const rq = st.get(k); rq.onsuccess = () => { if (rq.result) out[k] = rq.result; }; });
+        tx.oncomplete = () => res(out); tx.onerror = () => res(out);
+      });
+    } catch (e) { return {}; }
+  }
+  async function idbPut(items) {
+    try {
+      const db = await idb();
+      await new Promise(res => { const tx = db.transaction('cells', 'readwrite'); items.forEach(it => tx.objectStore('cells').put(it)); tx.oncomplete = res; tx.onerror = res; });
+    } catch (e) { /* sem armazenamento */ }
+  }
+  const cellKey = (i, j) => 'c' + i + '_' + j;
+  function cellsAround(centers, radius) {
+    const set = new Set();
+    centers.forEach(c => {
+      for (let i = Math.floor((c.lat - radius) / CELL); i <= Math.floor((c.lat + radius) / CELL); i++)
+        for (let j = Math.floor((c.lng - radius) / CELL); j <= Math.floor((c.lng + radius) / CELL); j++) set.add(cellKey(i, j));
+    });
+    return Array.from(set);
+  }
+  const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+  async function loadStreets(centers) {
+    const keys = cellsAround(centers, 0.025);
+    const cached = await idbGet(keys);
+    const missing = keys.filter(k => !cached[k] || Date.now() - cached[k].t > 60 * 864e5);
+    if (missing.length) {
+      const boxes = missing.map(k => { const [i, j] = k.slice(1).split('_').map(Number); return [i * CELL, j * CELL, (i + 1) * CELL, (j + 1) * CELL]; });
+      const q = '[out:json][timeout:25];(' + boxes.map(b => 'way["highway"]["name"](' + b.map(v => v.toFixed(3)).join(',') + ');').join('') + ');out geom tags;';
+      let data = null;
+      for (const url of OVERPASS) {
+        try { data = await fetchJSON(url + '?data=' + encodeURIComponent(q), 30000); break; } catch (e) { /* tenta o próximo */ }
+      }
+      if (data && data.elements) {
+        const perCell = {}; missing.forEach(k => { perCell[k] = []; });
+        for (const el of data.elements) {
+          if (el.type !== 'way' || !el.geometry || !el.tags || !el.tags.name) continue;
+          const g = el.geometry.map(p => [+p.lat.toFixed(6), +p.lon.toFixed(6)]);
+          const w = { id: el.id, n: el.tags.name, g };
+          const touched = new Set(g.map(p => cellKey(Math.floor(p[0] / CELL), Math.floor(p[1] / CELL))));
+          touched.forEach(k => { if (perCell[k]) perCell[k].push(w); });
+        }
+        const items = missing.map(k => ({ k, t: Date.now(), ways: perCell[k] }));
+        await idbPut(items);
+        items.forEach(it => { cached[it.k] = it; });
+      }
+    }
+    const seen = new Set(), ways = [];
+    keys.forEach(k => (cached[k] ? cached[k].ways : []).forEach(w => { if (!seen.has(w.id)) { seen.add(w.id); ways.push(w); } }));
+    return ways;
+  }
+
+  // ---------- O algoritmo de localização ----------
+  //  1. O que já se sabe (ajuste manual, coordenada da planilha, cache): pronto na hora.
+  //  2. Centro de cada bairro da rota (Photon, guardado para sempre).
+  //  3. Malha de ruas da região (Overpass, guardada para sempre) → casa o nome da rua no
+  //     próprio celular e posiciona pelo número (metros ao longo da rua, ímpar/par de lados opostos).
+  //  4. Só o que a malha não achou vai para a busca (Photon, depois Nominatim).
+  //  5. Viterbi na ordem da rota: entre os candidatos de cada parada, fica o que é coerente
+  //     com as paradas vizinhas. Isso elimina pinos "voando" para outro bairro.
   async function locateAll() {
     S.busy = true; S.t0 = performance.now();
     const need = [];
     for (const s of S.stops) {
+      s.cands = null;
       if (S.fix[s.key]) setLoc(s, S.fix[s.key].lat, S.fix[s.key].lng, 'manual', 'ajuste');
       else if (Number.isFinite(s.sheetLat)) setLoc(s, s.sheetLat, s.sheetLng, 'planilha', 'planilha');
       else if (S.geo[s.key] && (S.geo[s.key].conf !== 'baixa' || Date.now() - S.geo[s.key].t < 3 * 864e5)) {
         const g = S.geo[s.key]; setLoc(s, g.lat, g.lng, g.conf, g.src === 'bairro' ? 'bairro' : 'cache');
       }
-      else { s.conf = 'wait'; need.push(s); }
+      else { s.conf = 'wait'; s.lat = NaN; s.lng = NaN; need.push(s); }
     }
-    // 1) Coordenadas da planilha: confere se alguma caiu longe do resto da rota
-    const outl = C.findOutliers(S.stops.filter(s => s.conf === 'planilha'));
-    S.stops.forEach(s => { if (outl.has(s.id)) { s.conf = 'fora'; if (s.street) need.push(s); } });
     renderAll(); fitAll(true);
-    updateProgress(need.length);
 
     if (need.length) {
-      // 2) CEPs únicos em paralelo
+      phase('Lendo bairros', 0.1);
       const ceps = Array.from(new Set(need.map(s => s.cep).filter(c => c && !S.cepCache[c])));
       await pool(ceps, 6, lookupCep);
-
-      // 2b) Centro de cada cidade e bairro da rota (poucos pedidos, guardados para sempre)
       const cityList = Array.from(new Set(need.map(s => s.city).filter(Boolean)));
       await pool(cityList, 3, lookupCity);
       const bairroList = Array.from(new Map(need.filter(s => s.bairro).map(s => [placeKey(s.bairro, s.city), s])).values());
       await pool(bairroList, 5, s => lookupBairro(s.bairro, s.city));
       store.set(K.place, S.places);
-
-      // 3) Âncora da rota: mediana dos pontos já conhecidos, senão dos CEPs
-      const known = S.stops.filter(s => Number.isFinite(s.lat) && s.conf !== 'fora');
-      const cepPts = need.map(s => S.cepCache[s.cep]).filter(c => c && c.lat != null);
-      if (known.length) S.anchor = C.centroid(known);
-      else if (cepPts.length) S.anchor = C.centroid(cepPts);
       const cities = need.map(s => s.city || (S.cepCache[s.cep] || {}).city).filter(Boolean);
       S.cityGuess = cities.length ? mostCommon(cities) : '';
 
-      // 4) Photon em paralelo (4 por vez); cada parada aparece no mapa assim que sai
-      let done = 0;
-      await pool(need, 5, async s => {
-        try {
-          const r = await geocodePhoton(s);
-          applyResult(s, r);
-        } catch (e) { applyResult(s, null); }
-        if (!S.anchor && Number.isFinite(s.lat) && s.conf === 'alta') S.anchor = { lat: s.lat, lng: s.lng };
-        updateProgress(need.length - (++done));
-        updateStop(s);
-        if (done === Math.min(8, need.length)) fitAll(true);
+      // centros de onde a rota passa: bairros, CEPs e pontos já conhecidos
+      const centers = [];
+      need.forEach(s => {
+        const b = S.places[placeKey(s.bairro, s.city)]; if (b) centers.push(b);
+        const c = S.cepCache[s.cep]; if (c && c.lat != null) centers.push({ lat: c.lat, lng: c.lng });
       });
+      S.stops.forEach(s => { if (Number.isFinite(s.lat) && s.conf !== 'fora') centers.push(s); });
+      if (!centers.length) need.forEach(s => { const c = cityCenter(s.city); if (c) centers.push(c); });
+      const uniq = Array.from(new Map(centers.map(c => [c.lat.toFixed(2) + ',' + c.lng.toFixed(2), c])).values());
 
-      saveCaches();
-    }
-    // 6) Com todos os pontos na mão, procura quem caiu longe do resto da rota (inclusive
-    //    coordenadas erradas vindas da planilha) e tenta localizar de novo pelo endereço.
-    const out2 = C.findOutliers(S.stops.filter(s => Number.isFinite(s.lat) && s.conf !== 'manual' && s.conf !== 'fora'));
-    const recheck = S.stops.filter(s => out2.has(s.id));
-    if (recheck.length) {
-      recheck.forEach(s => { s.conf = 'fora'; delete S.geo[s.key]; updateStop(s); });
-      const ceps = Array.from(new Set(recheck.map(s => s.cep).filter(c => c && !S.cepCache[c])));
-      await pool(ceps, 6, lookupCep);
-      const known = S.stops.filter(s => Number.isFinite(s.lat) && s.conf !== 'fora');
-      if (known.length) S.anchor = C.centroid(known);
-      await pool(recheck.filter(s => s.street || s.cep), 4, async s => {
-        try { applyResult(s, await geocodePhoton(s)); } catch (e) { /* mantém como fora */ }
-        if (s.conf !== 'fora' && S.anchor && C.haversineKm(S.anchor, s) > 25) s.conf = 'fora';
-        updateStop(s);
+      phase('Baixando o mapa das ruas da região', 0.25);
+      let chains = [];
+      try { chains = C.buildChains(await loadStreets(uniq)); } catch (e) { chains = []; }
+
+      phase('Localizando pelo número', 0.45);
+      const noLocal = [];
+      need.forEach(s => {
+        const ctx = { bairroCenter: S.places[placeKey(s.bairro, s.city)] || null,
+          downtown: CITY_DOWNTOWN[C.norm(s.city)] || cityCenter(s.city) };
+        s.cands = C.streetCandidates(s, chains, ctx);
+        if (!s.cands.length || s.cands[0].score < 0.75) noLocal.push(s);
       });
+      chooseAll(); // primeira escolha já mostra os pinos
+
+      // Só o que a malha não resolveu vai para a busca na internet
+      if (noLocal.length) {
+        let left = noLocal.length;
+        phase('Buscando ' + left + ' endereços', 0.6);
+        await pool(noLocal, 5, async s => {
+          try { s.cands = (s.cands || []).concat(await geocodePhoton(s)); } catch (e) { /* segue */ }
+          phase('Buscando ' + (--left) + ' endereços', 0.6 + 0.2 * (1 - left / noLocal.length));
+        });
+        const still = noLocal.filter(s => !s.cands.length || Math.max(...s.cands.map(c => c.score)) < 0.6).slice(0, 10);
+        left = still.length;
+        for (const s of still) {
+          phase('Conferindo ' + left + ' na 2ª fonte', 0.85);
+          try { s.cands = s.cands.concat(await geocodeNominatim(s)); } catch (e) { /* segue */ }
+          left--;
+        }
+        chooseAll();
+      }
       saveCaches();
     }
+    const out = C.findOutliers(S.stops.filter(s => Number.isFinite(s.lat) && s.conf !== 'manual'));
+    S.stops.forEach(s => { if (out.has(s.id) && s.conf !== 'manual') { s.conf = 'fora'; delete S.geo[s.key]; } });
+    S.stops.forEach(s => upsertMarker(s));
+    renderList();
     const secs = ((performance.now() - S.t0) / 1000).toFixed(1).replace('.', ',');
     updateProgress(0, secs);
     renderSummary(); fitAll(false); saveLast();
-
-    // 5) Segunda opinião (Nominatim) em segundo plano, só para os duvidosos, no máximo 25.
-    //    O mapa já está pronto; os pinos vão se corrigindo sozinhos.
-    const weak = need.filter(s => s.conf === 'baixa' || s.conf === 'wait').slice(0, 25);
-    if (weak.length) {
-      await refine(weak, secs);
-      saveCaches(); saveLast(); renderSummary();
-    }
     S.busy = false;
   }
 
-  function applyResult(s, r) {
-    const prev = s.conf;
-    const cep = S.cepCache[s.cep];
-    if (prev === 'fora' && !(r && r.best && r.best.score >= 0.6) && !(cep && cep.lat != null)) return;
-    if (r && r.best && r.best.score >= 0.6) {
-      setLoc(s, r.best.cand.lat, r.best.cand.lng, C.confidenceFromScore(r.best.score), 'busca');
-      s.score = r.best.score;
-    } else if (cep && cep.lat != null) {
-      setLoc(s, cep.lat, cep.lng, 'media', 'cep'); s.score = 0.6;
-    } else if (r && r.best && r.best.score > 0.45) {
-      setLoc(s, r.best.cand.lat, r.best.cand.lng, 'baixa', 'busca'); s.score = r.best.score;
-    } else if (S.places[placeKey(s.bairro, s.city)]) {
-      const b = S.places[placeKey(s.bairro, s.city)];
-      setLoc(s, b.lat, b.lng, 'baixa', 'bairro'); s.score = 0.3;
-    } else if (prev === 'fora') {
-      // coordenada da planilha suspeita e a busca não confirmou: mantém e pede conferência
-    } else {
-      s.conf = 'baixa'; s.lat = NaN; s.lng = NaN; s.score = 0;
-    }
-    remember(s);
+  function phase(text, frac) {
+    $('chipInfo').textContent = text + '…';
+    $('progressBar').style.width = Math.round(100 * frac) + '%';
   }
 
-  async function refine(list, readySecs) {
-    let left = list.length;
-    const show = () => readySecs != null
-      ? updateProgress(0, readySecs, null, left ? 'conferindo ' + left : '')
-      : updateProgress(left, null, 'Refinando');
-    show();
-    for (const s of list) {
-      try {
-        const r = await geocodeNominatim(s);
-        if (r && r.best && r.best.score > (s.score || 0) + 0.05) {
-          setLoc(s, r.best.cand.lat, r.best.cand.lng, C.confidenceFromScore(r.best.score), 'busca');
-          s.score = r.best.score; remember(s); updateStop(s);
-        }
-      } catch (e) { /* sem rede ou limite */ }
-      left--; show();
+  // Monta os candidatos de todas as paradas na ordem da rota e roda o Viterbi
+  function chooseAll() {
+    const ordered = S.stops.slice().sort((a, b) => (a.seq ?? a.order) - (b.seq ?? b.order) || a.order - b.order);
+    const seqStops = [], cands = [];
+    for (const s of ordered) {
+      let list;
+      if (s.cands) {
+        list = s.cands.slice();
+        const b = S.places[placeKey(s.bairro, s.city)];
+        if (b) list.push({ lat: b.lat, lng: b.lng, score: 0.12, src: 'bairro' });
+        const c = S.cepCache[s.cep];
+        if (c && c.lat != null) list.push({ lat: c.lat, lng: c.lng, score: 0.55, src: 'cep' });
+      } else if (Number.isFinite(s.lat) && s.conf !== 'fora') {
+        list = [{ lat: s.lat, lng: s.lng, score: 1, src: 'fixo' }];
+      } else continue;
+      if (!list.length) continue;
+      seqStops.push(s); cands.push(list);
     }
+    const pick = C.viterbi(cands, 0.3);
+    seqStops.forEach((s, t) => {
+      if (!s.cands) return;
+      const c = cands[t][pick[t]];
+      const conf = c.src === 'bairro' ? 'baixa'
+        : c.src === 'rua' ? (c.score >= 0.85 && c.inRange ? 'alta' : c.score >= 0.6 ? 'media' : 'baixa')
+        : C.confidenceFromScore(c.score);
+      setLoc(s, c.lat, c.lng, conf, c.src === 'busca' ? 'busca' : c.src);
+      s.score = c.score;
+      remember(s);
+      updateStop(s);
+    });
+    S.stops.forEach(s => { if (s.cands && !seqStops.includes(s)) { s.conf = 'baixa'; s.lat = NaN; s.lng = NaN; updateStop(s); } });
   }
 
   function mostCommon(arr) {
@@ -496,6 +564,7 @@
   function backToStart() {
     $('mapScreen').hidden = true; $('start').hidden = false;
     closePanels(); setRiskMode(false); renderRecent();
+    if (S.follow) toggleFollow();
   }
 
   // ---------- Mapa ----------
@@ -506,10 +575,22 @@
       addBaseMap(dark);
       S.map.on('click', onMapClick);
       // quando o motorista mexe no mapa, a busca para de reenquadrar a visão sozinha
-      S.map.on('dragstart', () => { S.userMoved = true; });
+      S.map.on('dragstart', () => { S.userMoved = true; if (S.follow) toggleFollow(); });
+      // Pinos muito próximos viram um círculo com a quantidade; tocar aproxima ou abre em leque
+      S.layer = L.markerClusterGroup ? L.markerClusterGroup({
+        maxClusterRadius: 50, spiderfyOnMaxZoom: true, showCoverageOnHover: false, disableClusteringAtZoom: 18,
+        spiderfyDistanceMultiplier: 1.8, zoomToBoundsOnClick: true,
+        iconCreateFunction: cl => {
+          const kids = cl.getAllChildMarkers();
+          const nums = kids.map(m => m.options.stopOrder).filter(Boolean).sort((a, b) => a - b);
+          const label = nums.length <= 3 ? nums.join(' · ') : nums[0] + '–' + nums[nums.length - 1];
+          return L.divIcon({ className: '', iconSize: [44, 44], iconAnchor: [22, 22],
+            html: '<div class="cluster"><b>' + kids.length + '</b><span>' + label + '</span></div>' });
+        }
+      }).addTo(S.map) : L.layerGroup().addTo(S.map);
     }
     S.userMoved = false;
-    S.markers.forEach(m => m.remove()); S.markers.clear();
+    S.layer.clearLayers(); S.markers.clear();
     drawZones();
     setTimeout(() => S.map.invalidateSize(), 50);
   }
@@ -549,15 +630,22 @@
   }
   function upsertMarker(s, noSpread) {
     let m = S.markers.get(s.id);
-    if (!Number.isFinite(s.lat)) { if (m) { m.remove(); S.markers.delete(s.id); } return; }
-    if (!noSpread) samePoint(s).forEach(o => { if (o !== s) upsertMarker(o, true); });
-    const pos = displayPos(s);
+    if (!Number.isFinite(s.lat)) { if (m) { S.layer.removeLayer(m); S.markers.delete(s.id); } return; }
+    const clustered = !!L.markerClusterGroup;
+    if (!clustered && !noSpread) samePoint(s).forEach(o => { if (o !== s) upsertMarker(o, true); });
+    const pos = clustered ? [s.lat, s.lng] : displayPos(s);
     const icon = L.divIcon({ className: '', html: '<div class="pin ' + pinClass(s) + '"><span>' + s.order + '</span></div>', iconSize: [30, 30], iconAnchor: [15, 30] });
     if (!m) {
-      m = L.marker(pos, { icon, keyboard: false }).addTo(S.map);
+      m = L.marker(pos, { icon, keyboard: false, stopOrder: s.order });
       m.on('click', () => select(s.id, true));
+      S.layer.addLayer(m);
       S.markers.set(s.id, m);
-    } else { m.setLatLng(pos); m.setIcon(icon); }
+    } else {
+      m.options.stopOrder = s.order;
+      const moved = m.getLatLng().lat !== pos[0] || m.getLatLng().lng !== pos[1];
+      if (moved && clustered) { S.layer.removeLayer(m); m.setLatLng(pos); S.layer.addLayer(m); } else if (moved) m.setLatLng(pos);
+      m.setIcon(icon);
+    }
     m.setZIndexOffset(S.selected === s.id ? 1000 : 0);
   }
 
@@ -614,7 +702,7 @@
         (s.city ? '<dt>Cidade</dt><dd>' + esc(s.city) + '</dd>' : '') +
         (s.cep ? '<dt>CEP</dt><dd class="num">' + s.cep.slice(0, 5) + '-' + s.cep.slice(5) + '</dd>' : '') +
         '<dt>Pacotes</dt><dd class="num">' + esc(s.packages.join(', ')) + '</dd>' +
-        '<dt>Local</dt><dd>' + esc(CONF_LABEL[conf]) + (s.src === 'cep' ? ' (pelo CEP)' : s.src === 'bairro' ? ' (centro do bairro, ajuste o pino)' : '') + '</dd>' +
+        '<dt>Local</dt><dd>' + esc(CONF_LABEL[conf]) + ({ cep: ' (pelo CEP)', bairro: ' (centro do bairro, ajuste o pino)', rua: ' (pelo número na rua)', busca: ' (busca de endereço)' }[s.src] || '') + '</dd>' +
         '</dl><div class="row">' +
         '<a class="btn btn-small" href="' + L2.gmaps + '" target="_blank" rel="noopener">' + ICON.map + ' Google Maps</a>' +
         '<button class="btn btn-small" data-fix>' + (Number.isFinite(s.lat) ? 'Ajustar pino' : 'Marcar no mapa') + '</button>' +
@@ -705,7 +793,9 @@
     const s = S.stops.find(x => x.id === id);
     if (S.selected && s) {
       if (fromMap && S.sheetState === 'peek') setSheet('half');
-      if (Number.isFinite(s.lat)) panVisible(s);
+      const mk = S.markers.get(id);
+      if (Number.isFinite(s.lat) && mk && S.layer.zoomToShowLayer && !fromMap) S.layer.zoomToShowLayer(mk, () => panVisible(s));
+      else if (Number.isFinite(s.lat)) panVisible(s);
       const el = S.rows.get(id);
       if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
     }
@@ -925,6 +1015,24 @@
     }, () => { if (!silent) toast('Não consegui sua localização. Libere o GPS para este site.'); }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 });
   }
 
+  // Seguir minha posição: o mapa acompanha o motorista até ele arrastar o mapa
+  let watchId = null;
+  function toggleFollow() {
+    S.follow = !S.follow;
+    $('followBtn').classList.toggle('on-accent', S.follow);
+    $('followBtn').setAttribute('aria-pressed', String(S.follow));
+    if (S.follow && navigator.geolocation) {
+      watchId = navigator.geolocation.watchPosition(pos => {
+        S.me = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        const icon = L.divIcon({ className: '', html: '<div class="me-dot"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
+        if (S.meMarker) S.meMarker.setLatLng([S.me.lat, S.me.lng]); else S.meMarker = L.marker([S.me.lat, S.me.lng], { icon, interactive: false, zIndexOffset: 3000 }).addTo(S.map);
+        if (S.follow) S.map.setView([S.me.lat, S.me.lng], Math.max(S.map.getZoom(), 16), { animate: true });
+      }, () => { toast('Não consegui sua localização. Libere o GPS para este site.'); if (S.follow) toggleFollow(); },
+      { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 });
+      toast('Seguindo sua posição. Arraste o mapa para parar.');
+    } else if (watchId != null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  }
+
   let wakeLock = null;
   async function keepAwake() {
     try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) { /* opcional */ }
@@ -932,7 +1040,7 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !$('mapScreen').hidden) keepAwake(); });
 
   function closePanels() {
-    ['zonePanel', 'zonesPanel', 'chunksPanel'].forEach(id => { const el = $(id); if (el) el.hidden = true; });
+    ['zonePanel', 'zonesPanel', 'chunksPanel', 'helpPanel'].forEach(id => { const el = $(id); if (el) el.hidden = true; });
     if (S.pendingLayer) cancelZone();
   }
 
@@ -981,16 +1089,12 @@
     $('fixCancel').onclick = () => endFix(false);
     $('optBtn').onclick = optimize;
     $('gmapsBtn').onclick = openGmaps;
-    $('retryBtn').onclick = async () => {
-      if (S.busy) { toast('Ainda estou localizando, espere terminar.'); return; }
-      const weak = S.stops.filter(s => ['baixa', 'media', 'fora', 'wait'].includes(s.conf) || !Number.isFinite(s.lat)).slice(0, 40);
-      if (!weak.length) { toast('Todas as paradas já estão com local exato ou ajustado.'); return; }
-      S.busy = true;
-      toast('Conferindo ' + weak.length + ' endereços com uma segunda fonte (cerca de 1 por segundo).', 4000);
-      await pool(weak.map(s => s.cep).filter(c => c && !S.cepCache[c]), 6, lookupCep);
-      await refine(weak);
-      saveCaches(); saveLast(); S.busy = false; updateProgress(0); renderSummary();
-    };
+    $('zoomInBtn').onclick = () => S.map.zoomIn();
+    $('zoomOutBtn').onclick = () => S.map.zoomOut();
+    $('followBtn').onclick = toggleFollow;
+    $('listBtn').onclick = () => setSheet(S.sheetState === 'peek' ? 'half' : 'peek');
+    $('helpBtn').onclick = () => { closePanels(); $('helpPanel').hidden = false; };
+    $('helpClose').onclick = () => { $('helpPanel').hidden = true; };
     $('summary').addEventListener('click', e => {
       const b = e.target.closest('[data-filter]'); if (!b) return;
       S.filter = b.dataset.filter; renderSummary(); renderList();

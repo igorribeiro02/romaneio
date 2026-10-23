@@ -39,26 +39,22 @@ Também entende variações que aparecem no arquivo: "Rua X 295, Ap510", "Av X -
 
 ## Como o algoritmo localiza as paradas
 
-O romaneio não traz CEP nem coordenadas, então tudo sai do texto do endereço:
+O romaneio não traz CEP nem coordenadas, então tudo sai do texto do endereço. Tudo acontece uma vez só, quando você escolhe a rota, e fica guardado no celular.
 
-1. **Agrupa** os pacotes por endereço (menos buscas).
-2. **Usa o que já sabe primeiro**, sem internet: pinos ajustados à mão (para sempre) e endereços já buscados (cache no celular). Reabrir uma rota já vista é instantâneo.
-3. **Centro de cada bairro e cidade** da rota: poucos pedidos, guardados para sempre. Servem de âncora: uma "Rua Um" encontrada em outro bairro perde pontos.
-4. **Busca** (Photon/OpenStreetMap) 5 endereços ao mesmo tempo, dentro da região da cidade. Se o resultado ficar fraco, tenta de novo só com rua e cidade.
-5. **Pontuação** de cada resultado: semelhança do nome da rua (Jaro-Winkler), número, bairro, cidade e distância até o centro do bairro.
-   - Verde (Exato): ≥ 0,80
-   - Amarelo (Rua): ≥ 0,60, a rua certa sem o número exato no mapa
-   - Vermelho (Conferir): abaixo disso. O pino fica no centro do bairro, e você ajusta uma vez só
-6. **Pontos fora da área**: quem cai muito longe do resto da rota é marcado e buscado de novo.
-7. **Segunda fonte** (Nominatim) em segundo plano para os duvidosos. O mapa já está pronto e os pinos vão se corrigindo sozinhos.
+1. **O que já se sabe**: pinos ajustados por você, endereços já localizados antes. Aparecem na hora.
+2. **Centro de cada bairro** da rota (uma busca por bairro, guardada para sempre). As grafias diferentes, como "Ponta D Areia", "Ponta DAreia" e "Ponta da Areia", viram o mesmo bairro.
+3. **Mapa das ruas da região** (OpenStreetMap via Overpass), baixado em quadrados de ~2 km e guardado no celular. Com o tempo o hub inteiro fica salvo.
+4. **Casamento local do nome da rua** (Jaro-Winkler) contra todas as ruas da região, sem depender de serviço de busca. "Travessa X" não é confundida com "Rua X".
+5. **Posição pelo número**: no Brasil o número costuma ser a distância em metros desde o início da rua. O app coloca o 469 a ~469 m do começo da rua, com ímpares e pares em lados opostos. Isso separa paradas da mesma rua, que antes caíam todas no mesmo ponto.
+6. **Viterbi na ordem da rota**: cada parada tem vários candidatos (rua homônima em outro bairro, os dois sentidos de numeração). O algoritmo escolhe o conjunto que melhor equilibra o nome e o bairro batendo com a parada ficar perto das vizinhas na sequência da Shopee. Isso elimina pinos "voando" para longe.
+7. **Só o que sobrar** vai para a busca na internet (Photon, depois Nominatim).
 
-Medido com o romaneio real, rota G-31 (64 paradas), com busca simulada a 250 ms por pedido:
+Cores: verde = pelo número na rua · amarelo = só a rua (número fora do tamanho da rua, ou S/N) · vermelho = conferir (centro do bairro) · roxo = ajustado por você.
 
-- Primeiro pino: ~1 s
-- Mapa completo: ~6 s
+Medido com o romaneio real (G-31, H-21, I-1) e malha de ruas simulada:
+
+- Rota pronta: 2–4 s
 - Reabrir a mesma rota: instantâneo
-
-Com a internet real o tempo varia com a rede. Como as ruas do hub se repetem muito, o cache vai deixando tudo mais rápido a cada dia.
 
 ## Áreas de risco
 

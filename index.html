@@ -17,6 +17,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
 <style>
 /* Layout: mapa em tela cheia + gaveta inferior arrastável, estilo placa de trânsito (azul de serviço, asfalto). */
 :root {
@@ -153,6 +154,19 @@ button { cursor: pointer; }
   position: absolute; z-index: 800; right: max(12px, env(safe-area-inset-right, 0px));
   bottom: calc(var(--sheet-h) + 14px); display: flex; flex-direction: column; gap: 8px; transition: bottom .2s;
 }
+.fabs-left { right: auto; left: max(12px, env(safe-area-inset-left, 0px)); }
+.fabs .icon-btn { width: 42px; height: 42px; border-radius: 11px; }
+.icon-btn.on-accent { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.cluster {
+  width: 44px; height: 44px; border-radius: 50%; background: var(--asphalt); color: #fff;
+  border: 3px solid #fff; box-shadow: 0 0 0 3px var(--accent), 0 3px 10px rgba(0,0,0,.35);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1;
+}
+.cluster b { font: 700 17px/1 var(--font-display); }
+.cluster span { font: 600 8px/1.1 var(--font-body); opacity: .85; max-width: 38px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.help { margin: 0; display: grid; grid-template-columns: minmax(0, 11em) minmax(0, 1fr); gap: 8px 12px; font-size: 15px; }
+.help dt { font-weight: 600; }
+.help dd { margin: 0; color: var(--muted); }
 .banner {
   position: absolute; z-index: 850; left: max(12px, env(safe-area-inset-left, 0px)); right: max(12px, env(safe-area-inset-right, 0px));
   top: calc(env(safe-area-inset-top, 0px) + 66px); background: var(--risk); color: #fff; border-radius: 12px;
@@ -308,18 +322,36 @@ button { cursor: pointer; }
   <div class="banner example" id="exampleBanner" hidden>Exemplo com endereços fictícios em Niterói. Abra o seu romaneio para usar de verdade. <u>Fechar</u></div>
   <div class="banner" id="riskBanner" hidden>Toque no mapa no centro da área de risco</div>
 
+  <div class="fabs fabs-left">
+    <button class="icon-btn" id="zoomInBtn" aria-label="Aproximar" title="Aproximar">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="icon-btn" id="zoomOutBtn" aria-label="Afastar" title="Afastar">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M5 12h14"/></svg>
+    </button>
+  </div>
+
   <div class="fabs">
+    <button class="icon-btn" id="helpBtn" aria-label="Como usar o mapa" title="Como usar o mapa">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5h.01"/></svg>
+    </button>
     <button class="icon-btn" id="riskBtn" aria-label="Marcar área de risco" title="Marcar área de risco">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
     </button>
     <button class="icon-btn" id="zonesBtn" aria-label="Áreas de risco salvas" title="Áreas de risco salvas">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>
     </button>
+    <button class="icon-btn" id="listBtn" aria-label="Mostrar ou esconder a lista" title="Mostrar ou esconder a lista">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
+    </button>
     <button class="icon-btn" id="fitBtn" aria-label="Ver todas as paradas" title="Ver todas as paradas">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     </button>
-    <button class="icon-btn" id="meBtn" aria-label="Minha posição" title="Minha posição">
+    <button class="icon-btn" id="meBtn" aria-label="Ir para minha posição" title="Ir para minha posição">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7"/></svg>
+    </button>
+    <button class="icon-btn" id="followBtn" aria-label="Seguir minha posição" aria-pressed="false" title="Seguir minha posição">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-8-8 18-2-8z"/></svg>
     </button>
   </div>
 
@@ -331,7 +363,6 @@ button { cursor: pointer; }
     <div class="tools">
       <button class="btn btn-small" id="gmapsBtn">Abrir no Google Maps</button>
       <button class="btn btn-small" id="optBtn">Otimizar ordem</button>
-      <button class="btn btn-small" id="retryBtn">Refinar endereços</button>
     </div>
     <div class="list" id="list" role="list"></div>
   </div>
@@ -362,6 +393,27 @@ button { cursor: pointer; }
     <button class="btn" id="zonesClose">Fechar</button>
   </div>
 
+  <!-- Painel: como usar o mapa -->
+  <div class="panel" id="helpPanel" hidden>
+    <h2>Como usar o mapa</h2>
+    <dl class="help">
+      <dt>Arrastar com um dedo</dt><dd>Move o mapa</dd>
+      <dt>Pinça com dois dedos</dt><dd>Aproxima e afasta (ou use + e −)</dd>
+      <dt>Toque duplo</dt><dd>Aproxima naquele ponto</dd>
+      <dt>Tocar num pino</dt><dd>Abre a parada na lista com Waze, Google Maps e ajuste</dd>
+      <dt>Círculo com número</dt><dd>Várias paradas juntas. Toque para aproximar; se estiverem no mesmo prédio, abrem em leque</dd>
+      <dt>Botão seta</dt><dd>Segue sua posição enquanto você dirige. Arrastar o mapa desliga</dd>
+      <dt>Botão mira</dt><dd>Vai até onde você está, uma vez</dd>
+      <dt>Botão quadrado</dt><dd>Mostra a rota inteira</dd>
+      <dt>Botão lista</dt><dd>Esconde ou mostra a lista para ver o mapa maior</dd>
+      <dt>Barra da lista</dt><dd>Arraste para cima ou para baixo, ou toque para trocar o tamanho</dd>
+      <dt>Botão alerta</dt><dd>Marca área de risco: toque nele e depois no mapa</dd>
+      <dt>Ajustar pino</dt><dd>Na parada, toque em Ajustar e arraste o pino até a porta. Fica salvo</dd>
+    </dl>
+    <p class="hint">Cores: verde = pelo número na rua · amarelo = só a rua · vermelho = conferir · roxo = ajustado por você.</p>
+    <button class="btn" id="helpClose">Entendi</button>
+  </div>
+
   <!-- Painel: ajuste de pino -->
   <div class="panel" id="fixPanel" hidden>
     <h2>Ajustar local</h2>
@@ -376,6 +428,7 @@ button { cursor: pointer; }
 <div class="toast" id="toast" hidden role="status"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
 <script src="core.js"></script>
 <script src="app.js"></script>
 </body>
