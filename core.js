@@ -1,0 +1,471 @@
+/* Mapa do Romaneio — núcleo do algoritmo (funções puras, sem rede nem DOM).
+ * Usado pelo app no navegador e pelos testes em Node. */
+(function (root) {
+  'use strict';
+
+  // ---------- Texto ----------
+  function stripAccents(s) {
+    return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '');
+  }
+  function norm(s) {
+    return stripAccents(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  }
+  function normRouteCode(s) {
+    return stripAccents(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  }
+
+  // ---------- Detecção de colunas ----------
+  // Cada campo tem padrões testados contra o cabeçalho normalizado (ordem importa).
+  const FIELD_PATTERNS = {
+    lat: [/^lat$/, /^latitude/, /\blatitude\b/],
+    lng: [/^(lng|lon|long)$/, /^longitude/, /\blongitude\b/],
+    address: [/destination address/, /^endereco( de entrega| completo| destino)?$/, /^endereco/, /^logradouro/, /^address/, /^rua$/],
+    number: [/^(numero|num|n|no|nro|n o)$/, /^numero/],
+    complement: [/^complemento/, /^compl/],
+    bairro: [/^bairro/, /neighbo/, /^district/],
+    city: [/^cidade/, /^city/, /^municipio/],
+    cep: [/^cep/, /zip ?code/, /postal/],
+    seq: [/^sequence$/, /^sequencia/, /^seq$/, /^ordem/, /^parada$/, /^stop$/, /^#$/],
+    pkg: [/spx tn/, /tracking/, /^rastreio/, /^codigo do pacote/, /^pacote/, /^pedido/, /^tn$/, /^id do pacote/],
+    route: [/^rota$/, /^route$/, /corridor cage/, /^gaiola/, /^cluster/, /^corredor/, /cage/, /^codigo da rota/, /^rota /],
+    recipient: [/^destinatario/, /^recipient/, /^nome do cliente/, /^cliente$/, /^nome$/]
+  };
+
+  function detectColumns(headerRow) {
+    const map = {};
+    const used = new Set();
+    const headers = headerRow.map(norm);
+    for (const field of Object.keys(FIELD_PATTERNS)) {
+      for (const re of FIELD_PATTERNS[field]) {
+        const idx = headers.findIndex((h, i) => h && !used.has(i) && re.test(h));
+        if (idx >= 0) { map[field] = idx; used.add(idx); break; }
+      }
+    }
+    return map;
+  }
+
+  // Procura nas primeiras linhas a que mais parece um cabeçalho.
+  function findHeaderRow(rows) {
+    let best = { index: -1, score: 0, map: {} };
+    const limit = Math.min(rows.length, 20);
+    for (let i = 0; i < limit; i++) {
+      const row = rows[i] || [];
+      const map = detectColumns(row);
+      let score = Object.keys(map).length;
+      if (map.address != null) score += 2;
+      if (map.lat != null && map.lng != null) score += 2;
+      if (score > best.score) best = { index: i, score, map };
+    }
+    return best.score >= 2 ? best : null;
+  }
+
+  // ---------- Números ----------
+  function parseNum(v) {
+    if (v == null || v === '') return NaN;
+    if (typeof v === 'number') return v;
+    let s = String(v).trim();
+    if (/^-?\d{1,3}(\.\d{3})+,\d+$/.test(s)) s = s.replace(/\./g, '').replace(',', '.');
+    else s = s.replace(',', '.');
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  // Algumas planilhas trazem coordenada sem ponto (ex.: -22905123). Corrige pela faixa do Brasil.
+  function fixCoord(n, isLat) {
+    if (!Number.isFinite(n) || n === 0) return NaN;
+    const max = isLat ? 90 : 180;
+    let guard = 0;
+    while (Math.abs(n) > max && guard++ < 12) n = n / 10;
+    return n;
+  }
+  function inBrazil(lat, lng) {
+    return lat > -34.5 && lat < 6 && lng > -74.5 && lng < -28.5;
+  }
+
+  // ---------- Endereço ----------
+  const ABBREV = [
+    [/\br\.?(?=\s)/g, 'rua'], [/\bav\.?(?=\s)/g, 'avenida'], [/\bavn?\b/g, 'avenida'],
+    [/\b(trav|tv)\.?(?=\s)/g, 'travessa'], [/\bestr\.?(?=\s)/g, 'estrada'], [/\best\.(?=\s)/g, 'estrada'],
+    [/\brodv?\.?(?=\s)/g, 'rodovia'], [/\bal\.?(?=\s)/g, 'alameda'], [/\bp(c|ca|ç|ça)\.?(?=\s)/g, 'praca'],
+    [/\blgo\.?(?=\s)/g, 'largo'], [/\bvl\.?(?=\s)/g, 'vila'], [/\bjd\.?(?=\s)/g, 'jardim'],
+    [/\bdr\.?(?=\s)/g, 'doutor'], [/\bdra\.?(?=\s)/g, 'doutora'], [/\bprof\.?(?=\s)/g, 'professor'],
+    [/\bprofa\.?(?=\s)/g, 'professora'], [/\bsen\.?(?=\s)/g, 'senador'], [/\bgen\.?(?=\s)/g, 'general'],
+    [/\bcel\.?(?=\s)/g, 'coronel'], [/\bcap\.?(?=\s)/g, 'capitao'], [/\bmal\.?(?=\s)/g, 'marechal'],
+    [/\bmaj\.?(?=\s)/g, 'major'], [/\beng\.?(?=\s)/g, 'engenheiro'], [/\bsta\.?(?=\s)/g, 'santa'],
+    [/\bsto\.?(?=\s)/g, 'santo'], [/\bpres\.?(?=\s)/g, 'presidente'], [/\bgov\.?(?=\s)/g, 'governador'],
+    [/\bdes\.?(?=\s)/g, 'desembargador'], [/\bver\.?(?=\s)/g, 'vereador'], [/\bmin\.?(?=\s)/g, 'ministro'],
+    [/\bn\.?\s?s(ra)?\.?(?=\s)/g, 'nossa senhora'], [/\bsao\b/g, 'sao']
+  ];
+  const STREET_TYPES = ['rua', 'avenida', 'travessa', 'estrada', 'rodovia', 'alameda', 'praca', 'largo',
+    'vila', 'beco', 'ladeira', 'via', 'viela', 'servidao', 'caminho', 'passagem', 'parque', 'jardim', 'quadra'];
+  // Complementos que atrapalham a busca e são descartados.
+  // Só corta quando a palavra vem com código (apto 101, bloco B, casa 2) ou é inequívoca (fundos).
+  const COMPLEMENT_RE = /\b((apto?|apt|ap|apartamento|bloco|bl|casa|cs|lote|lt|sala|sl|loja|lj|andar|torre|box|kitnet|kit)\s*([a-z]?\d+[a-z]?|[a-z])\b|fundos|terreo|cobertura|sobrado)\b/g;
+
+  function expandAbbrev(s) {
+    let out = ' ' + stripAccents(s).toLowerCase() + ' ';
+    out = out.replace(/º|°|ª|⁰/g, ' ');
+    for (const [re, rep] of ABBREV) out = out.replace(re, rep);
+    return out.replace(/\s+/g, ' ').trim();
+  }
+
+  const SN_RE = /^(s\s*\/?\s*n[o]?|sem\s*n(umero|o)?|sn)\.?$/;
+  const NUM_PART_RE = /^(?:n(?:umero|o|r)?\.?\s*)?(\d{1,5})[a-z]?\b/;
+
+  function finishStreet(street) {
+    street = street.replace(COMPLEMENT_RE, ' ')
+      .replace(/\(.*?\)/g, ' ')          // "(Dois)"
+      .split('/')[0]                     // "Travessa X/ PAC Preventorio/ ..."
+      .replace(/[,;.]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (SN_RE.test(street)) street = '';
+    street = street.replace(/^(\w+) \1\b/, '$1'); // "R Rua X" virou "rua rua x"
+    const words = street.split(' ');
+    const type = STREET_TYPES.includes(words[0]) ? words[0] : '';
+    return { street, streetType: type, streetCore: type ? words.slice(1).join(' ') : street };
+  }
+
+  // Formato do romaneio Shopee: "Rua X, 123, referência" (às vezes ", Bairro, Cidade, Estado, CEP").
+  // Também aceita "Rua X 123, Ap 510", "Rua X - N.370, ...", "Rua X, S/N, ..." e textos sem vírgula.
+  function parseAddress(raw, numberCol, ctx) {
+    const original = String(raw == null ? '' : raw).replace(/\s+/g, ' ').trim();
+    ctx = ctx || {};
+    const ignore = new Set([norm(ctx.bairro), norm(ctx.city), 'rio de janeiro', 'rj', 'brasil', 'sao paulo', 'sp', 'minas gerais', 'mg'].filter(Boolean));
+    let number = numberCol != null && String(numberCol).trim() !== '' ? String(numberCol).replace(/\D+/g, '') : '';
+    let cepInText = '';
+    const origParts = original.split(',').map(x => x.trim());
+    const parts = origParts.map(x => expandAbbrev(x));
+
+    // tira partes que são só CEP, cidade, estado ou bairro repetido
+    const keep = [];
+    parts.forEach((p, i) => {
+      const c = p.match(/^(\d{5})-?(\d{3})$/);
+      if (c) { cepInText = c[1] + c[2]; return; }
+      if (i > 0 && ignore.has(norm(p))) return;
+      keep.push(i);
+    });
+
+    let street = '', numIdx = -1, sn = false;
+    if (keep.length) {
+      let first = parts[keep[0]].replace(COMPLEMENT_RE, ' ').replace(/\s+/g, ' ').trim();
+      // número grudado na rua: "rua marechal deodoro 295" ou "avenida x - n 370"
+      const tail = first.match(/^(.*?[a-z].*?)(?:\s*-\s*|\s+)(?:n(?:umero|o)?\.?\s*)?(\d{1,5})$/);
+      if (tail && tail[1].trim().split(' ').length >= 2 && !/\bde$/.test(tail[1].trim())) {
+        first = tail[1]; if (!number) number = tail[2]; numIdx = 0;
+      }
+      street = first;
+      // procura o número nas próximas partes (pula um bairro no meio: "Rua X, Centro, 86, Apto")
+      if (numIdx < 0) {
+        for (let k = 1; k < Math.min(keep.length, 3); k++) {
+          const p = parts[keep[k]].trim();
+          if (SN_RE.test(p)) { sn = true; numIdx = k; break; }
+          const m = p.match(NUM_PART_RE);
+          if (m) { if (!number) number = m[1]; numIdx = k; break; }
+        }
+      }
+    }
+
+    // Sem vírgula útil: usa a heurística antiga sobre o texto inteiro
+    if (keep.length <= 1 && numIdx < 0 && !sn) {
+      let s = expandAbbrev(original);
+      const cm = s.match(/\b(\d{5})-?(\d{3})\b/);
+      if (cm) { cepInText = cm[1] + cm[2]; s = s.replace(cm[0], ' '); }
+      s = s.replace(COMPLEMENT_RE, ' ').replace(/\s+/g, ' ').trim();
+      const re = /\b(\d{1,5})\b(?!\s+de\b)/g;
+      let m, last = null;
+      while ((m = re.exec(s))) {
+        const before = s.slice(0, m.index).trim();
+        if (before && /[a-z]/.test(before) && before.split(' ').length >= 2) last = m;
+      }
+      if (last) { if (!number) number = last[1]; street = s.slice(0, last.index); }
+      else street = s;
+    }
+
+    const st = finishStreet(street);
+    // referência para o motorista: o que vem depois do número, com a grafia original
+    const refFrom = numIdx >= 0 ? numIdx + 1 : 1;
+    const ref = keep.slice(refFrom).map(i => origParts[i]).filter(Boolean).join(', ');
+    const display = keep.length ? keep.slice(0, Math.max(refFrom, 1)).map(i => origParts[i]).join(', ') : original;
+
+    return Object.assign(st, { original, display, ref, number, sn, bairroHint: '', cepInText });
+  }
+
+  function cleanCep(v) {
+    const d = String(v == null ? '' : v).replace(/\D+/g, '');
+    if (d.length === 8) return d;
+    if (d.length === 7) return '0' + d; // planilha comeu o zero à esquerda
+    return '';
+  }
+
+  // Chave estável para cache e para agrupar pacotes do mesmo endereço.
+  function addressKey(p) {
+    return [norm(p.street), p.number || 's/n', p.cep || norm(p.bairro), norm(p.city)].join('|');
+  }
+
+  // ---------- Similaridade ----------
+  function jaroWinkler(a, b) {
+    a = norm(a); b = norm(b);
+    if (!a || !b) return 0;
+    if (a === b) return 1;
+    const md = Math.max(0, Math.floor(Math.max(a.length, b.length) / 2) - 1);
+    const am = new Array(a.length).fill(false), bm = new Array(b.length).fill(false);
+    let m = 0;
+    for (let i = 0; i < a.length; i++) {
+      const lo = Math.max(0, i - md), hi = Math.min(i + md + 1, b.length);
+      for (let j = lo; j < hi; j++) {
+        if (bm[j] || a[i] !== b[j]) continue;
+        am[i] = bm[j] = true; m++; break;
+      }
+    }
+    if (!m) return 0;
+    let t = 0, k = 0;
+    for (let i = 0; i < a.length; i++) {
+      if (!am[i]) continue;
+      while (!bm[k]) k++;
+      if (a[i] !== b[k]) t++;
+      k++;
+    }
+    const jaro = (m / a.length + m / b.length + (m - t / 2) / m) / 3;
+    let p = 0;
+    while (p < 4 && a[p] === b[p]) p++;
+    return jaro + p * 0.1 * (1 - jaro);
+  }
+  // Compara só o "miolo" do nome da rua (sem Rua/Avenida), e também por palavras.
+  function streetSimilarity(a, b) {
+    const strip = s => { const w = norm(expandAbbrev(s)).split(' '); return (STREET_TYPES.includes(w[0]) ? w.slice(1) : w).join(' '); };
+    const A = strip(a), B = strip(b);
+    if (!A || !B) return 0;
+    const whole = jaroWinkler(A, B);
+    const wa = A.split(' ').filter(w => w.length > 2), wb = new Set(B.split(' ').filter(w => w.length > 2));
+    const overlap = wa.length ? wa.filter(w => wb.has(w)).length / Math.max(wa.length, wb.size) : 0;
+    return Math.max(whole, overlap);
+  }
+
+  // ---------- Geografia ----------
+  function haversineKm(a, b) {
+    const R = 6371, toRad = x => x * Math.PI / 180;
+    const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+  function median(arr) {
+    if (!arr.length) return NaN;
+    const s = arr.slice().sort((x, y) => x - y), m = s.length >> 1;
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+  function centroid(points) {
+    return { lat: median(points.map(p => p.lat)), lng: median(points.map(p => p.lng)) };
+  }
+
+  // ---------- Pontuação de candidatos do geocodificador ----------
+  // query: {streetCore, street, number, cep, bairro, city, anchor:{lat,lng}|null}
+  // cand: {lat, lng, street, housenumber, postcode, district, city, type}
+  function scoreCandidate(query, cand) {
+    const sStreet = streetSimilarity(query.street || query.streetCore, cand.street || cand.name || '');
+    let score = 0.62 * sStreet;
+    const reasons = [];
+    if (query.number && cand.housenumber) {
+      const cn = String(cand.housenumber).replace(/\D+/g, '');
+      if (cn === query.number) { score += 0.16; reasons.push('número'); }
+    }
+    const pc = String(cand.postcode || '').replace(/\D+/g, '');
+    if (query.cep && pc) {
+      if (pc === query.cep) { score += 0.14; reasons.push('CEP'); }
+      else if (pc.slice(0, 5) === query.cep.slice(0, 5)) { score += 0.08; reasons.push('CEP parcial'); }
+    }
+    if (query.bairro && cand.district && jaroWinkler(query.bairro, cand.district) >= 0.88) { score += 0.08; reasons.push('bairro'); }
+    if (query.city && cand.city) {
+      if (jaroWinkler(query.city, cand.city) >= 0.88) score += 0.04;
+      else score -= 0.25;
+    }
+    if (query.anchor && Number.isFinite(cand.lat)) {
+      const d = haversineKm(query.anchor, cand);
+      if (query.tight) { // âncora é o centro do bairro: rua com o mesmo nome em outro bairro perde pontos
+        if (d > 5) score -= 0.35; else if (d > 2.5) score -= 0.12; else score += 0.04;
+      } else if (d > 25) score -= 0.35; else if (d > 10) score -= 0.12;
+    }
+    if (cand.type === 'house' && reasons.includes('número')) score += 0.04;
+    return { score: Math.max(0, Math.min(1, score)), sStreet, reasons };
+  }
+  function confidenceFromScore(s) {
+    if (s >= 0.8) return 'alta';
+    if (s >= 0.6) return 'media';
+    return 'baixa';
+  }
+
+  // ---------- Pontos fora da área ----------
+  // Marca quem está longe demais da mediana da rota (distância > max(minKm, 4 × desvio mediano)).
+  function findOutliers(points, minKm) {
+    minKm = minKm || 12;
+    const good = points.filter(p => Number.isFinite(p.lat));
+    if (good.length < 4) return new Set();
+    const c = centroid(good);
+    const dists = good.map(p => haversineKm(c, p));
+    const mad = median(dists);
+    const limit = Math.max(minKm, 4 * mad);
+    const out = new Set();
+    good.forEach((p, i) => { if (dists[i] > limit) out.add(p.id); });
+    return out;
+  }
+
+  // ---------- Ordem das paradas ----------
+  function routeLengthKm(order, pts, start) {
+    let total = 0, prev = start || null;
+    for (const i of order) { if (prev) total += haversineKm(prev, pts[i]); prev = pts[i]; }
+    return total;
+  }
+  // Vizinho mais próximo + melhoria 2-opt. Rápido para até ~300 paradas no celular.
+  function optimizeOrder(pts, start) {
+    const n = pts.length;
+    if (n < 3) return pts.map((_, i) => i);
+    const left = new Set(pts.map((_, i) => i));
+    const order = [];
+    let cur = start;
+    if (!cur) { order.push(0); left.delete(0); cur = pts[0]; }
+    while (left.size) {
+      let best = -1, bd = Infinity;
+      for (const i of left) { const d = haversineKm(cur, pts[i]); if (d < bd) { bd = d; best = i; } }
+      order.push(best); left.delete(best); cur = pts[best];
+    }
+    const D = (a, b) => haversineKm(a, b);
+    const P = i => (i < 0 ? start : pts[order[i]]);
+    let improved = true, rounds = 0;
+    const deadline = Date.now() + 600;
+    while (improved && rounds++ < 40 && Date.now() < deadline) {
+      improved = false;
+      for (let i = start ? 0 : 1; i < n - 1; i++) {
+        const a = P(i - 1); if (!a) continue;
+        const b = P(i);
+        for (let k = i + 1; k < n; k++) {
+          const c = P(k), d = k + 1 < n ? P(k + 1) : null;
+          const before = D(a, b) + (d ? D(c, d) : 0);
+          const after = D(a, c) + (d ? D(b, d) : 0);
+          if (after + 1e-9 < before) {
+            const seg = order.slice(i, k + 1).reverse();
+            order.splice(i, seg.length, ...seg);
+            improved = true;
+            break;
+          }
+        }
+      }
+    }
+    return order;
+  }
+
+  // ---------- Montagem da rota a partir da planilha ----------
+  function cell(row, idx) { return idx == null ? '' : (row[idx] == null ? '' : row[idx]); }
+
+  // "Neves (Neves)" → "Neves"
+  function cleanBairro(b) {
+    const t = String(b || '').trim();
+    const m = t.match(/^(.*?)\s*\((.*?)\)\s*$/);
+    return m ? (m[1] || m[2]).trim() : t;
+  }
+
+  function routeCounts(data, idx) {
+    const m = new Map();
+    data.forEach(r => { const c = String(cell(r, idx)).trim(); if (c) m.set(c, (m.get(c) || 0) + 1); });
+    const nat = c => { const x = c.match(/^([A-Za-z]*)\W*(\d*)/); return [x[1].toUpperCase(), +x[2] || 0]; };
+    return Array.from(m, ([code, n]) => ({ code, n })).sort((a, b) => {
+      const A = nat(a.code), B = nat(b.code);
+      return A[0] < B[0] ? -1 : A[0] > B[0] ? 1 : A[1] - B[1];
+    });
+  }
+
+  // Lê só o cabeçalho e as rotas existentes (para sugerir na tela inicial).
+  function listRoutes(rows) {
+    const header = findHeaderRow(rows);
+    if (!header) return null;
+    const data = rows.slice(header.index + 1);
+    return { header, routes: header.map.route != null ? routeCounts(data, header.map.route) : [], total: data.filter(r => r && r.some(c => String(c == null ? '' : c).trim() !== '')).length };
+  }
+
+  // rows: matriz de células (todas as abas já concatenadas ou a aba escolhida)
+  // Retorna {stops, info} com paradas agrupadas por endereço.
+  function buildRoute(rows, routeCode) {
+    const header = findHeaderRow(rows);
+    if (!header) return { error: 'Não encontrei o cabeçalho da planilha (colunas como Endereço, Bairro, CEP).' };
+    const map = header.map;
+    let data = rows.slice(header.index + 1).filter(r => r && r.some(c => String(c == null ? '' : c).trim() !== ''));
+    const code = normRouteCode(routeCode);
+    let routeNote = '';
+
+    if (code) {
+      if (map.route != null) {
+        const filtered = data.filter(r => normRouteCode(cell(r, map.route)) === code);
+        if (!filtered.length) {
+          const codes = routeCounts(data, map.route).map(x => x.code);
+          const near = codes.filter(c => c[0] === String(routeCode).trim().toUpperCase()[0]).slice(0, 6);
+          return { error: 'A rota ' + routeCode + ' não está nesta planilha.' + (near.length ? ' Parecidas: ' + near.join(', ') + '.' : ''), routes: codes };
+        }
+        data = filtered; routeNote = 'Rota ' + routeCode;
+      } else {
+        // procura a rota em qualquer célula da linha
+        const filtered = data.filter(r => r.some(c => normRouteCode(c) === code));
+        if (filtered.length && filtered.length < data.length) { data = filtered; routeNote = 'Filtrado pelas linhas que citam ' + routeCode; }
+        else routeNote = 'Planilha tratada como a rota ' + routeCode;
+      }
+    } else if (map.route != null) {
+      const codes = routeCounts(data, map.route);
+      if (codes.length > 1) return { error: 'Esta planilha tem ' + codes.length + ' rotas. Digite a sua (ex.: ' + codes[0].code + ').', routes: codes.map(x => x.code) };
+    }
+
+    const groups = new Map();
+    data.forEach((r, i) => {
+      const addrRaw = cell(r, map.address);
+      if (!String(addrRaw).trim() && map.lat == null) return;
+      const bairroRaw = String(cell(r, map.bairro)).trim();
+      const city = String(cell(r, map.city)).trim();
+      const parsed = parseAddress(addrRaw, cell(r, map.number), { bairro: bairroRaw, city });
+      const cep = cleanCep(cell(r, map.cep)) || parsed.cepInText;
+      const bairro = cleanBairro(bairroRaw);
+      let lat = fixCoord(parseNum(cell(r, map.lat)), true);
+      let lng = fixCoord(parseNum(cell(r, map.lng)), false);
+      if (!(Number.isFinite(lat) && Number.isFinite(lng) && inBrazil(lat, lng))) { lat = NaN; lng = NaN; }
+      const seqRaw = parseNum(cell(r, map.seq));
+      const stop = {
+        street: parsed.street, streetCore: parsed.streetCore, streetType: parsed.streetType,
+        number: parsed.number, cep, bairro, city, original: parsed.display || parsed.original
+      };
+      const key = addressKey(stop);
+      const pkg = String(cell(r, map.pkg)).trim();
+      const recipient = String(cell(r, map.recipient)).trim();
+      const complement = [String(cell(r, map.complement)).trim(), parsed.ref].filter(Boolean).join(' · ');
+      if (!groups.has(key)) {
+        groups.set(key, Object.assign(stop, {
+          id: 's' + groups.size, key, row: i, seq: Number.isFinite(seqRaw) ? seqRaw : null,
+          sheetLat: lat, sheetLng: lng, packages: [], seqs: [], recipients: [], complements: []
+        }));
+      }
+      const g = groups.get(key);
+      g.packages.push(pkg || (Number.isFinite(seqRaw) ? 'seq ' + seqRaw : '#' + (i + 1)));
+      if (Number.isFinite(seqRaw)) g.seqs.push(seqRaw);
+      if (recipient && !g.recipients.includes(recipient)) g.recipients.push(recipient);
+      if (complement && !g.complements.includes(complement)) g.complements.push(complement);
+      if (Number.isFinite(seqRaw) && (g.seq == null || seqRaw < g.seq)) g.seq = seqRaw;
+      if (!Number.isFinite(g.sheetLat) && Number.isFinite(lat)) { g.sheetLat = lat; g.sheetLng = lng; }
+    });
+
+    let stops = Array.from(groups.values());
+    if (stops.some(s => s.seq != null)) stops.sort((a, b) => (a.seq ?? 1e9) - (b.seq ?? 1e9) || a.row - b.row);
+    stops.forEach((s, i) => { s.order = i + 1; });
+    return {
+      stops,
+      info: {
+        columns: map, headerRow: header.index, rows: data.length, routeNote,
+        hasCoords: stops.some(s => Number.isFinite(s.sheetLat))
+      }
+    };
+  }
+
+  function pointInCircle(p, zone) {
+    return haversineKm(p, zone) * 1000 <= zone.radius;
+  }
+
+  const api = {
+    stripAccents, norm, normRouteCode, detectColumns, findHeaderRow, parseNum, fixCoord, inBrazil,
+    expandAbbrev, parseAddress, cleanCep, addressKey, jaroWinkler, streetSimilarity, haversineKm,
+    centroid, median, scoreCandidate, confidenceFromScore, findOutliers, optimizeOrder, routeLengthKm,
+    buildRoute, pointInCircle, listRoutes, cleanBairro
+  };
+  root.RomCore = api;
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+})(typeof self !== 'undefined' ? self : this);
