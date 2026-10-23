@@ -84,7 +84,7 @@
   // ---------- Endereço ----------
   const ABBREV = [
     [/\br\.?(?=\s)/g, 'rua'], [/\bav\.?(?=\s)/g, 'avenida'], [/\bavn?\b/g, 'avenida'],
-    [/\b(trav|tv)\.?(?=\s)/g, 'travessa'], [/\bestr\.?(?=\s)/g, 'estrada'], [/\best\.(?=\s)/g, 'estrada'],
+    [/\b(trav|tv)\.?(?=\s)/g, 'travessa'], [/\bestr\.?(?=\s)/g, 'estrada'], [/\best\.?(?=\s)/g, 'estrada'],
     [/\brodv?\.?(?=\s)/g, 'rodovia'], [/\bal\.?(?=\s)/g, 'alameda'], [/\bp(c|ca|ç|ça)\.?(?=\s)/g, 'praca'],
     [/\blgo\.?(?=\s)/g, 'largo'], [/\bvl\.?(?=\s)/g, 'vila'], [/\bjd\.?(?=\s)/g, 'jardim'],
     [/\bdr\.?(?=\s)/g, 'doutor'], [/\bdra\.?(?=\s)/g, 'doutora'], [/\bprof\.?(?=\s)/g, 'professor'],
@@ -99,7 +99,7 @@
     'vila', 'beco', 'ladeira', 'via', 'viela', 'servidao', 'caminho', 'passagem', 'parque', 'jardim', 'quadra'];
   // Complementos que atrapalham a busca e são descartados.
   // Só corta quando a palavra vem com código (apto 101, bloco B, casa 2) ou é inequívoca (fundos).
-  const COMPLEMENT_RE = /\b((apto?|apt|ap|apartamento|bloco|bl|casa|cs|lote|lt|sala|sl|loja|lj|andar|torre|box|kitnet|kit)\s*([a-z]?\d+[a-z]?|[a-z])\b|fundos|terreo|cobertura|sobrado)\b/g;
+  const COMPLEMENT_RE = /\b((apto?|apt|ap|apartamento|bloco|bl|casa|cs|lote|lt|qd|quadra|sala|sl|loja|lj|andar|torre|box|kitnet|kit)(\s*[a-z]?\d+[a-z]?|\s+[a-z])\b|fundos|terreo|cobertura|sobrado)\b/g;
 
   function expandAbbrev(s) {
     let out = ' ' + stripAccents(s).toLowerCase() + ' ';
@@ -115,9 +115,12 @@
     street = street.replace(COMPLEMENT_RE, ' ')
       .replace(/\(.*?\)/g, ' ')          // "(Dois)"
       .split('/')[0]                     // "Travessa X/ PAC Preventorio/ ..."
+      .split(/\s+-\s+/)[0]               // "Rua Dezessete - interfone"
+      .replace(/\b(paralela|proximo|perto|esquina|em frente|ao lado|atras|antiga|entrada|acesso)\b.*$/, '')
       .replace(/[,;.]+/g, ' ').replace(/\s+/g, ' ').trim();
     if (SN_RE.test(street)) street = '';
     street = street.replace(/^(\w+) \1\b/, '$1'); // "R Rua X" virou "rua rua x"
+    street = street.replace(/(\s+[a-z])+$/, '').trim(); // sobra de "LT 20 E"
     const words = street.split(' ');
     const type = STREET_TYPES.includes(words[0]) ? words[0] : '';
     return { street, streetType: type, streetCore: type ? words.slice(1).join(' ') : street };
@@ -186,6 +189,23 @@
     const display = keep.length ? keep.slice(0, Math.max(refFrom, 1)).map(i => origParts[i]).join(', ') : original;
 
     return Object.assign(st, { original, display, ref, number, sn, bairroHint: '', cepInText });
+  }
+
+  const NUM_WORDS = { um: 1, uma: 1, dois: 2, duas: 2, tres: 3, quatro: 4, cinco: 5, seis: 6, sete: 7, oito: 8, nove: 9, dez: 10,
+    onze: 11, doze: 12, treze: 13, quatorze: 14, catorze: 14, quinze: 15, dezesseis: 16, dezessete: 17, dezoito: 18, dezenove: 19,
+    vinte: 20, trinta: 30, quarenta: 40, cinquenta: 50 };
+  // "rua vinte e nove" → "rua 29" (no mapa muitas ruas de loteamento estão com o número)
+  function wordsToDigits(s) {
+    return norm(s).replace(/\b(vinte|trinta|quarenta|cinquenta)( e (um|dois|tres|quatro|cinco|seis|sete|oito|nove))?\b|\b(um|dois|tres|quatro|cinco|seis|sete|oito|nove|dez|onze|doze|treze|quatorze|catorze|quinze|dezesseis|dezessete|dezoito|dezenove)\b/g,
+      m => String(m.split(' e ').reduce((a, w) => a + NUM_WORDS[w], 0)));
+  }
+  function digitsToWords(s) {
+    const inv = {}; Object.entries(NUM_WORDS).forEach(([w, n]) => { if (!inv[n]) inv[n] = w; });
+    return norm(s).replace(/\b(\d{1,2})\b/g, m => {
+      const n = +m; if (inv[n]) return inv[n];
+      const t = Math.floor(n / 10) * 10, u = n % 10;
+      return inv[t] && inv[u] ? inv[t] + ' e ' + inv[u] : m;
+    });
   }
 
   function cleanCep(v) {
@@ -475,7 +495,7 @@
   }
 
   // ways: [{id, n: nome, g: [[lat,lng],...]}] → trechos contínuos por nome
-  function buildChains(ways) {
+  function buildChains(ways, gapKm) {
     const byName = new Map();
     for (const w of ways) {
       if (!w.n || !w.g || w.g.length < 2) continue;
@@ -495,41 +515,48 @@
         }
       });
       const used = new Set();
-      const pieces = [];
+      const pieces = []; // {pts, subs}
       while (used.size < list.length) {
         // começa por uma ponta (nó com um trecho só) ainda livre
         let startNode = null;
         for (const [k, ids] of adj) { const free = ids.filter(i => !used.has(i)); if (free.length === 1) { startNode = k; break; } }
         if (!startNode) { const i = list.findIndex((_, j) => !used.has(j)); startNode = keyPt(list[i].g[0]); }
         let node = startNode, pts = null;
+        const subs = new Set();
         for (;;) {
           const next = (adj.get(node) || []).find(i => !used.has(i));
           if (next == null) break;
           used.add(next);
+          if (list[next].sub) subs.add(list[next].sub);
           const g = list[next].g;
           const forward = keyPt(g[0]) === node;
           const seg = forward ? g : g.slice().reverse();
           pts = pts ? pts.concat(seg.slice(1)) : seg.slice();
           node = keyPt(seg[seg.length - 1]);
         }
-        if (pts && pts.length > 1) pieces.push(pts);
+        if (pts && pts.length > 1) pieces.push({ pts, subs });
       }
-      // junta pedaços do mesmo nome separados por menos de 40 m (praça, canteiro)
-      let merged = true;
-      while (merged && pieces.length > 1) {
-        merged = false;
-        outer: for (let i = 0; i < pieces.length; i++) {
+      // junta pedaços do mesmo nome com buraco de até 250 m (praça, canteiro, trecho que o mapa não trouxe),
+      // sempre pelo par de pontas mais próximo
+      for (;;) {
+        let best = null;
+        for (let i = 0; i < pieces.length; i++) {
           for (let j = i + 1; j < pieces.length; j++) {
-            const a = pieces[i], b = pieces[j];
+            const a = pieces[i].pts, b = pieces[j].pts;
             const opts = [[a[a.length - 1], b[0], () => a.concat(b)], [a[a.length - 1], b[b.length - 1], () => a.concat(b.slice().reverse())],
               [a[0], b[b.length - 1], () => b.concat(a)], [a[0], b[0], () => b.slice().reverse().concat(a)]];
             for (const [p, q, join] of opts) {
-              if (segKm(p, q) < 0.04) { pieces[i] = join(); pieces.splice(j, 1); merged = true; break outer; }
+              const d = segKm(p, q);
+              if (d < (gapKm || 0.25) && (!best || d < best.d)) best = { d, i, j, join };
             }
           }
         }
+        if (!best) break;
+        const subs = new Set([...pieces[best.i].subs, ...pieces[best.j].subs]);
+        pieces[best.i] = { pts: best.join(), subs };
+        pieces.splice(best.j, 1);
       }
-      pieces.forEach(pts => chains.push(makeChain(name, pts)));
+      pieces.forEach(pc => { const c = makeChain(name, pc.pts); c.subs = Array.from(pc.subs); chains.push(c); });
     }
     return chains;
   }
@@ -599,6 +626,36 @@
     return out.sort((a, b) => b.score - a.score).slice(0, 8);
   }
 
+  // Candidatos para uma parada usando os trechos de rua devolvidos pelo Nominatim.
+  // Cada trecho sabe em que bairro está, então "mesma rua em outro bairro" perde pontos direto.
+  function nominatimCandidates(stop, chains, ctx) {
+    const out = [];
+    const bk = bairroKey(stop.bairro);
+    const num = stop.number ? +stop.number : null;
+    for (const c of chains) {
+      const sim = Math.max(streetSimilarity(stop.street, c.name), streetSimilarity(wordsToDigits(stop.street), c.name));
+      if (sim < 0.8) continue;
+      let score = 0.55 + 0.4 * sim; // a rua já veio filtrada pela cidade
+      const subs = (c.subs || []).map(bairroKey);
+      if (bk && subs.length) score += subs.includes(bk) || subs.some(x => x && (x.includes(bk) || bk.includes(x))) ? 0.12 : -0.15;
+      const p0 = { lat: c.pts[0][0], lng: c.pts[0][1] }, p1 = { lat: c.pts[c.pts.length - 1][0], lng: c.pts[c.pts.length - 1][1] };
+      const startIsFirst = ctx && ctx.downtown ? haversineKm(ctx.downtown, p0) <= haversineKm(ctx.downtown, p1) : true;
+      if (num) {
+        const inRange = num <= c.len * 1.15 + 20;
+        for (const fromEnd of [false, true]) {
+          const pos = positionOnChain(c, num, fromEnd, stop.number);
+          const natural = fromEnd ? !startIsFirst : startIsFirst;
+          let sc = score + (inRange ? 0.03 : -0.15) - (natural ? 0 : 0.05);
+          out.push({ lat: pos.lat, lng: pos.lng, score: Math.max(0.02, Math.min(1.15, sc)), src: 'rua', inRange, street: c.name });
+        }
+      } else {
+        const pos = positionOnChain(c, c.len / 2, false, null);
+        out.push({ lat: pos.lat, lng: pos.lng, score: Math.max(0.02, score - 0.15), src: 'rua', inRange: false, street: c.name });
+      }
+    }
+    return out.sort((a, b) => b.score - a.score).slice(0, 8);
+  }
+
   // Viterbi: escolhe, para cada parada, o candidato que equilibra "texto bate" com
   // "fica perto da parada anterior e da próxima" (a rota da Shopee anda em sequência).
   // cands[t] = [{lat, lng, score}] na ordem da rota. Devolve o índice escolhido em cada t.
@@ -637,7 +694,7 @@
     stripAccents, norm, normRouteCode, detectColumns, findHeaderRow, parseNum, fixCoord, inBrazil,
     expandAbbrev, parseAddress, cleanCep, addressKey, jaroWinkler, streetSimilarity, haversineKm,
     centroid, median, scoreCandidate, confidenceFromScore, findOutliers, optimizeOrder, routeLengthKm,
-    buildRoute, pointInCircle, listRoutes, cleanBairro, buildChains, positionOnChain, streetCandidates, viterbi, bairroKey
+    buildRoute, pointInCircle, listRoutes, cleanBairro, buildChains, positionOnChain, streetCandidates, viterbi, bairroKey, nominatimCandidates, wordsToDigits, digitsToWords
   };
   root.RomCore = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

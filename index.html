@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
 <title>Mapa do Romaneio</title>
-<meta name="description" content="Abra o romaneio (.xlsx), digite a rota e veja todas as paradas no mapa.">
+<meta name="description" content="Abra o romaneio, toque na sua rota e veja as paradas no mapa ou navegue pelo Google Maps.">
 <meta name="theme-color" content="#1b2430">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -17,251 +17,163 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.min.css">
 <style>
-/* Layout: mapa em tela cheia + gaveta inferior arrastável, estilo placa de trânsito (azul de serviço, asfalto). */
+/* Layout: tela de rotas em botões → mapa em tela cheia com gaveta inferior. Visual de placa de trânsito. */
 :root {
   --asphalt: #1b2430;
   --bg: #eef1f4;
   --surface: #ffffff;
-  --surface-2: #f5f7f9;
+  --surface-2: #f4f6f8;
   --line: #d7dde4;
   --fg: #18202a;
   --muted: #5d6875;
   --accent: #1f5fbf;
   --accent-fg: #ffffff;
+  --go: #1a7f45;
   --ok: #1e8a4c;
   --warn: #c98a00;
   --bad: #c8322b;
+  --none: #8a94a0;
   --risk: #b0195b;
   --manual: #6b4fc4;
   --shadow: 0 6px 24px rgba(20, 30, 45, .18);
   --font-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
   --font-body: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --sheet-h: 34vh;
+  --sheet-h: 46vh;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     --bg: #11161d; --surface: #19202a; --surface-2: #1f2833; --line: #2c3744;
-    --fg: #e8edf2; --muted: #9aa6b4; --accent: #5b93e6; --accent-fg: #0d1520;
-    --ok: #3cb371; --warn: #e2a72e; --bad: #ef5b52; --risk: #e0468a; --manual: #9b82ea;
+    --fg: #e8edf2; --muted: #9aa6b4; --accent: #5b93e6; --accent-fg: #0d1520; --go: #2fae67;
+    --ok: #3cb371; --warn: #e2a72e; --bad: #ef5b52; --none: #6f7a87; --risk: #e0468a; --manual: #9b82ea;
     --shadow: 0 6px 24px rgba(0, 0, 0, .5); color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
   --bg: #11161d; --surface: #19202a; --surface-2: #1f2833; --line: #2c3744;
-  --fg: #e8edf2; --muted: #9aa6b4; --accent: #5b93e6; --accent-fg: #0d1520;
-  --ok: #3cb371; --warn: #e2a72e; --bad: #ef5b52; --risk: #e0468a; --manual: #9b82ea;
+  --fg: #e8edf2; --muted: #9aa6b4; --accent: #5b93e6; --accent-fg: #0d1520; --go: #2fae67;
+  --ok: #3cb371; --warn: #e2a72e; --bad: #ef5b52; --none: #6f7a87; --risk: #e0468a; --manual: #9b82ea;
   --shadow: 0 6px 24px rgba(0, 0, 0, .5); color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
-body {
-  background: var(--bg); color: var(--fg); font: 16px/1.4 var(--font-body);
-  -webkit-tap-highlight-color: transparent; overscroll-behavior: none;
-}
+body { background: var(--bg); color: var(--fg); font: 16px/1.4 var(--font-body); -webkit-tap-highlight-color: transparent; overscroll-behavior: none; }
 button, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 [hidden] { display: none !important; }
 .num { font-variant-numeric: tabular-nums; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
 
 /* ---------- Tela inicial ---------- */
 #start {
-  min-height: 100%; display: flex; flex-direction: column; gap: 22px;
-  padding: calc(env(safe-area-inset-top, 0px) + 28px) max(18px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 28px) max(18px, env(safe-area-inset-left, 0px));
-  max-width: 560px; margin: 0 auto;
+  min-height: 100%; display: flex; flex-direction: column; gap: 18px; max-width: 640px; margin: 0 auto;
+  padding: calc(env(safe-area-inset-top, 0px) + 24px) max(16px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 24px) max(16px, env(safe-area-inset-left, 0px));
 }
 .brand { display: flex; align-items: center; gap: 12px; }
-.brand-sign {
-  width: 46px; height: 46px; border-radius: 9px; background: var(--accent); color: var(--accent-fg);
-  display: grid; place-items: center; border: 3px solid var(--surface); box-shadow: 0 0 0 2px var(--accent);
-}
-.brand h1 { font: 700 30px/1 var(--font-display); letter-spacing: .01em; margin: 0; text-transform: uppercase; }
+.brand-sign { width: 44px; height: 44px; border-radius: 9px; background: var(--accent); color: var(--accent-fg); display: grid; place-items: center; border: 3px solid var(--surface); box-shadow: 0 0 0 2px var(--accent); flex: none; }
+.brand h1 { font: 700 28px/1 var(--font-display); margin: 0; text-transform: uppercase; letter-spacing: .01em; }
 .brand p { margin: 2px 0 0; color: var(--muted); font-size: 14px; }
-.card {
-  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px;
-  display: flex; flex-direction: column; gap: 14px;
-}
-.step-label { font: 600 13px/1 var(--font-body); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
-.file-drop {
-  display: flex; align-items: center; gap: 14px; padding: 16px; border: 2px dashed var(--line);
-  border-radius: 12px; background: var(--surface-2); min-height: 72px;
-}
-.file-drop.has-file { border-style: solid; border-color: var(--accent); }
-.file-drop svg { flex: none; color: var(--accent); }
-.file-drop strong { display: block; font-weight: 600; }
-.file-drop span { color: var(--muted); font-size: 14px; word-break: break-all; }
-#fileInput, .visually-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
-.route-input {
-  width: 100%; font: 700 40px/1 var(--font-display); text-transform: uppercase; letter-spacing: .04em;
-  padding: 12px 14px; border: 2px solid var(--line); border-radius: 12px; background: var(--surface-2);
-  text-align: center;
-}
-.route-input:focus { border-color: var(--accent); outline: none; }
-.route-input::placeholder { color: var(--muted); opacity: .4; }
-.hint { color: var(--muted); font-size: 14px; margin: 0; }
-#routeHint.ok { color: var(--ok); font-weight: 600; }
-#routeHint.bad { color: var(--bad); font-weight: 600; }
-.ref { color: var(--fg); opacity: .75; font-size: 14px; line-height: 1.3; margin-top: 1px; overflow-wrap: anywhere; }
-.btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 52px;
-  padding: 0 18px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface);
-  font-weight: 600; text-decoration: none; color: inherit;
-}
-.btn-primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font: 700 20px/1 var(--font-display); text-transform: uppercase; letter-spacing: .04em; }
-.btn-primary:disabled { opacity: .45; }
-.btn-ghost { background: transparent; }
+.file-card { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 14px; background: var(--surface); border: 1px solid var(--line); }
+.file-card .ico { color: var(--accent); flex: none; }
+.file-card .txt { flex: 1; min-width: 0; }
+.file-card strong { display: block; }
+.file-card span { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px; padding: 0 16px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); font-weight: 600; text-decoration: none; color: inherit; }
+.btn-primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font: 700 19px/1 var(--font-display); text-transform: uppercase; letter-spacing: .04em; min-height: 56px; }
+.btn-go { background: var(--go); color: #fff; border-color: var(--go); font: 700 18px/1 var(--font-display); text-transform: uppercase; letter-spacing: .03em; }
 .btn-small { min-height: 40px; padding: 0 12px; font-size: 14px; border-radius: 10px; }
-.error { color: var(--bad); font-weight: 500; margin: 0; }
-.recent { display: flex; flex-direction: column; gap: 8px; }
-.recent button {
-  display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left;
-  padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface);
+.label { font: 600 13px/1 var(--font-body); color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+.search { width: 100%; padding: 14px 16px; border-radius: 12px; border: 2px solid var(--line); background: var(--surface); font: 700 24px/1 var(--font-display); text-transform: uppercase; letter-spacing: .04em; }
+.search:focus { border-color: var(--accent); outline: none; }
+.search::placeholder { color: var(--muted); opacity: .5; }
+.routes { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 1fr)); gap: 8px; }
+.route {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; min-height: 64px;
+  border-radius: 12px; border: 1px solid var(--line); background: var(--surface);
 }
-.recent b { font: 700 22px/1 var(--font-display); }
-.recent small { color: var(--muted); }
+.route b { font: 700 24px/1 var(--font-display); letter-spacing: .02em; }
+.route small { color: var(--muted); font-size: 12px; }
+.route.last { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.error { color: var(--bad); font-weight: 600; margin: 0; }
+.hint { color: var(--muted); font-size: 14px; margin: 0; }
+.empty-start { display: flex; flex-direction: column; gap: 14px; padding: 22px; border-radius: 16px; background: var(--surface); border: 1px dashed var(--line); }
 
 /* ---------- Mapa ---------- */
 #mapScreen { position: fixed; inset: 0; }
 #map { position: absolute; inset: 0; background: var(--surface-2); }
 .leaflet-container { font-family: var(--font-body); }
-/* modo escuro: escurece o mapa claro do OpenStreetMap sem precisar de outro provedor */
-.tiles-dark { filter: invert(1) hue-rotate(180deg) brightness(.95) contrast(.9); }
 .leaflet-control-attribution { background: var(--surface) !important; color: var(--muted) !important; }
 .leaflet-control-attribution a { color: var(--accent) !important; }
-.topbar {
-  position: absolute; z-index: 800; left: 0; right: 0; top: 0;
-  padding: calc(env(safe-area-inset-top, 0px) + 10px) max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px));
-  display: flex; gap: 8px; align-items: flex-start; pointer-events: none;
-}
+.tiles-dark { filter: invert(1) hue-rotate(180deg) brightness(.95) contrast(.9); }
+.topbar { position: absolute; z-index: 800; left: 0; right: 0; top: 0; display: flex; gap: 8px; align-items: flex-start; pointer-events: none;
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px)); }
 .topbar > * { pointer-events: auto; }
-.icon-btn {
-  width: 46px; height: 46px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface);
-  display: grid; place-items: center; box-shadow: var(--shadow); flex: none;
-}
+.icon-btn { width: 44px; height: 44px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); display: grid; place-items: center; box-shadow: var(--shadow); flex: none; }
 .icon-btn.on { background: var(--risk); color: #fff; border-color: var(--risk); }
-.route-chip {
-  flex: 1; min-width: 0; background: var(--asphalt); color: #fff; border-radius: 12px; padding: 7px 12px;
-  box-shadow: var(--shadow); display: flex; flex-direction: column; justify-content: center; min-height: 46px;
-}
-.route-chip b { font: 700 22px/1 var(--font-display); letter-spacing: .04em; text-transform: uppercase; }
-.route-chip span { font-size: 13px; opacity: .85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.progress { height: 3px; background: rgba(255,255,255,.18); border-radius: 2px; margin-top: 5px; overflow: hidden; }
-.progress i { display: block; height: 100%; width: 0; background: #ffd25a; transition: width .2s; }
-.fabs {
-  position: absolute; z-index: 800; right: max(12px, env(safe-area-inset-right, 0px));
-  bottom: calc(var(--sheet-h) + 14px); display: flex; flex-direction: column; gap: 8px; transition: bottom .2s;
-}
-.fabs-left { right: auto; left: max(12px, env(safe-area-inset-left, 0px)); }
-.fabs .icon-btn { width: 42px; height: 42px; border-radius: 11px; }
 .icon-btn.on-accent { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-.cluster {
-  width: 44px; height: 44px; border-radius: 50%; background: var(--asphalt); color: #fff;
-  border: 3px solid #fff; box-shadow: 0 0 0 3px var(--accent), 0 3px 10px rgba(0,0,0,.35);
-  display: flex; flex-direction: column; align-items: center; justify-content: center; line-height: 1;
-}
-.cluster b { font: 700 17px/1 var(--font-display); }
-.cluster span { font: 600 8px/1.1 var(--font-body); opacity: .85; max-width: 38px; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.help { margin: 0; display: grid; grid-template-columns: minmax(0, 11em) minmax(0, 1fr); gap: 8px 12px; font-size: 15px; }
-.help dt { font-weight: 600; }
-.help dd { margin: 0; color: var(--muted); }
-.banner {
-  position: absolute; z-index: 850; left: max(12px, env(safe-area-inset-left, 0px)); right: max(12px, env(safe-area-inset-right, 0px));
-  top: calc(env(safe-area-inset-top, 0px) + 66px); background: var(--risk); color: #fff; border-radius: 12px;
-  padding: 10px 14px; font-weight: 600; box-shadow: var(--shadow);
-}
-.banner.example { background: var(--asphalt); }
-
-/* Marcadores */
-.pin {
-  width: 30px; height: 30px; border-radius: 50% 50% 50% 4px; transform: rotate(-45deg);
-  display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.35);
-  background: var(--accent);
-}
+.route-chip { flex: 1; min-width: 0; background: var(--asphalt); color: #fff; border-radius: 12px; padding: 7px 12px; box-shadow: var(--shadow); min-height: 44px; }
+.route-chip b { font: 700 22px/1 var(--font-display); letter-spacing: .04em; }
+.route-chip span { display: block; font-size: 13px; opacity: .88; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.progress { height: 3px; background: rgba(255,255,255,.18); border-radius: 2px; margin-top: 5px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: #ffd25a; transition: width .25s; }
+.fabs { position: absolute; z-index: 800; right: max(12px, env(safe-area-inset-right, 0px)); bottom: calc(var(--sheet-h) + 12px); display: flex; flex-direction: column; gap: 8px; transition: bottom .2s; }
+.fabs-left { right: auto; left: max(12px, env(safe-area-inset-left, 0px)); }
+.banner { position: absolute; z-index: 850; left: max(12px, env(safe-area-inset-left, 0px)); right: max(12px, env(safe-area-inset-right, 0px)); top: calc(env(safe-area-inset-top, 0px) + 64px); background: var(--risk); color: #fff; border-radius: 12px; padding: 10px 14px; font-weight: 600; box-shadow: var(--shadow); }
+.pin { width: 30px; height: 30px; border-radius: 50% 50% 50% 4px; transform: rotate(-45deg); display: grid; place-items: center; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.35); background: var(--accent); }
 .pin span { transform: rotate(45deg); color: #fff; font: 700 14px/1 var(--font-display); }
-.pin.alta, .pin.planilha { background: var(--ok); }
-.pin.media { background: var(--warn); }
-.pin.baixa, .pin.fora { background: var(--bad); }
-.pin.manual { background: var(--manual); }
+.pin.alta { background: var(--ok); } .pin.media { background: var(--warn); } .pin.baixa { background: var(--bad); } .pin.manual { background: var(--manual); }
 .pin.risco { box-shadow: 0 0 0 4px var(--risk), 0 2px 6px rgba(0,0,0,.35); }
-.pin.done { opacity: .45; filter: grayscale(.7); }
-.pin.sel { transform: rotate(-45deg) scale(1.3); z-index: 1000; }
+.pin.done { opacity: .4; filter: grayscale(.7); }
+.pin.sel { transform: rotate(-45deg) scale(1.3); }
 .me-dot { width: 18px; height: 18px; border-radius: 50%; background: var(--accent); border: 3px solid #fff; box-shadow: 0 0 0 6px rgba(31,95,191,.25); }
 
 /* ---------- Gaveta ---------- */
-.sheet {
-  position: absolute; z-index: 900; left: 0; right: 0; bottom: 0; height: var(--sheet-h);
-  background: var(--surface); border-radius: 18px 18px 0 0; box-shadow: var(--shadow);
-  display: flex; flex-direction: column; transition: height .22s ease;
-  padding-bottom: env(safe-area-inset-bottom, 0px);
-}
+.sheet { position: absolute; z-index: 900; left: 0; right: 0; bottom: 0; height: var(--sheet-h); background: var(--surface); border-radius: 18px 18px 0 0; box-shadow: var(--shadow); display: flex; flex-direction: column; transition: height .22s ease; padding-bottom: env(safe-area-inset-bottom, 0px); }
 .sheet.dragging { transition: none; }
-.handle-area { padding: 8px max(14px, env(safe-area-inset-right, 0px)) 6px max(14px, env(safe-area-inset-left, 0px)); touch-action: none; cursor: grab; }
-.handle { width: 44px; height: 5px; border-radius: 3px; background: var(--line); margin: 0 auto 10px; }
+.handle-area { padding: 8px max(14px, env(safe-area-inset-right, 0px)) 8px max(14px, env(safe-area-inset-left, 0px)); touch-action: none; cursor: grab; display: flex; flex-direction: column; gap: 10px; }
+.handle { width: 44px; height: 5px; border-radius: 3px; background: var(--line); margin: 0 auto; }
+.nav-row { display: flex; gap: 8px; }
+.nav-row .btn-go { flex: 1; min-height: 52px; }
 .summary { display: flex; gap: 6px; flex-wrap: wrap; }
-.pill {
-  display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 4px 10px;
-  font-size: 13px; font-weight: 600; background: var(--surface-2); border: 1px solid var(--line);
-}
+.pill { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 4px 10px; font-size: 13px; font-weight: 600; background: var(--surface-2); border: 1px solid var(--line); }
 .pill i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .pill.f-on { background: var(--fg); color: var(--surface); border-color: var(--fg); }
-.tools { display: flex; gap: 8px; padding: 8px max(14px, env(safe-area-inset-right, 0px)) 8px max(14px, env(safe-area-inset-left, 0px)); overflow-x: auto; border-bottom: 1px solid var(--line); }
-.tools .btn { flex: none; }
-.list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 max(8px, env(safe-area-inset-right, 0px)) 16px max(8px, env(safe-area-inset-left, 0px)); }
-.stop {
-  display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; gap: 10px; align-items: center;
-  padding: 12px 6px; border-bottom: 1px solid var(--line);
-}
+.list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--line); padding: 0 max(8px, env(safe-area-inset-right, 0px)) 16px max(8px, env(safe-area-inset-left, 0px)); }
+.stop { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 11px 6px; border-bottom: 1px solid var(--line); }
 .stop.sel { background: var(--surface-2); border-radius: 10px; }
 .stop.done .addr { text-decoration: line-through; color: var(--muted); }
-.badge {
-  width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; color: #fff;
-  font: 700 17px/1 var(--font-display); background: var(--muted);
-}
-.badge.alta, .badge.planilha { background: var(--ok); }
-.badge.media { background: var(--warn); }
-.badge.baixa, .badge.fora { background: var(--bad); }
-.badge.manual { background: var(--manual); }
+.badge { width: 34px; height: 34px; border-radius: 9px; display: grid; place-items: center; color: #fff; font: 700 17px/1 var(--font-display); background: var(--none); }
+.badge.alta { background: var(--ok); } .badge.media { background: var(--warn); } .badge.baixa { background: var(--bad); } .badge.manual { background: var(--manual); }
 .badge.wait { background: var(--line); color: var(--muted); }
 .addr { font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
+.ref { font-size: 14px; line-height: 1.3; opacity: .78; overflow-wrap: anywhere; }
 .meta { color: var(--muted); font-size: 13px; display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
 .tag { font-size: 12px; font-weight: 600; padding: 1px 7px; border-radius: 6px; }
 .tag.risco { background: var(--risk); color: #fff; }
-.tag.conf { border: 1px solid currentColor; }
-.tag.media { color: var(--warn); } .tag.baixa, .tag.fora { color: var(--bad); } .tag.manual { color: var(--manual); }
+.tag.nopin { border: 1px solid var(--none); color: var(--muted); }
 .acts { display: flex; gap: 6px; }
-.act {
-  width: 42px; height: 42px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2);
-  display: grid; place-items: center; text-decoration: none; color: var(--fg);
-}
+.act { width: 42px; height: 42px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); display: grid; place-items: center; text-decoration: none; color: var(--fg); }
 .act.check.on { background: var(--ok); color: #fff; border-color: var(--ok); }
 .detail { grid-column: 2 / -1; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
-.detail .row { display: flex; gap: 8px; flex-wrap: wrap; }
 .detail dl { margin: 0; display: grid; grid-template-columns: auto minmax(0,1fr); gap: 2px 10px; }
-.detail dt { color: var(--muted); }
-.detail dd { margin: 0; overflow-wrap: anywhere; }
+.detail dt { color: var(--muted); } .detail dd { margin: 0; overflow-wrap: anywhere; }
+.detail .row { display: flex; gap: 8px; flex-wrap: wrap; }
 .empty { color: var(--muted); text-align: center; padding: 28px 12px; }
 
 /* ---------- Painéis ---------- */
-.panel {
-  position: absolute; z-index: 1000; left: 0; right: 0; bottom: 0; background: var(--surface);
-  border-radius: 18px 18px 0 0; box-shadow: var(--shadow); max-height: 80%; overflow-y: auto;
-  padding: 18px max(18px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 18px) max(18px, env(safe-area-inset-left, 0px));
-  display: flex; flex-direction: column; gap: 14px;
-}
+.panel { position: absolute; z-index: 1000; left: 0; right: 0; bottom: 0; background: var(--surface); border-radius: 18px 18px 0 0; box-shadow: var(--shadow); max-height: 82%; overflow-y: auto; display: flex; flex-direction: column; gap: 14px;
+  padding: 18px max(18px, env(safe-area-inset-right, 0px)) calc(env(safe-area-inset-bottom, 0px) + 18px) max(18px, env(safe-area-inset-left, 0px)); }
 .panel h2 { font: 700 24px/1 var(--font-display); text-transform: uppercase; margin: 0; letter-spacing: .02em; }
 .panel input[type=text] { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); }
 .panel input[type=range] { width: 100%; accent-color: var(--risk); }
 .panel .row { display: flex; gap: 8px; flex-wrap: wrap; }
 .panel .row .btn { flex: 1; }
 .zone-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
-.toast {
-  position: fixed; z-index: 2000; left: 50%; transform: translateX(-50%);
-  bottom: calc(var(--sheet-h) + 16px); background: var(--asphalt); color: #fff; padding: 10px 16px;
-  border-radius: 10px; font-weight: 500; box-shadow: var(--shadow); max-width: calc(100% - 32px); text-align: center;
-}
+.help { margin: 0; display: grid; grid-template-columns: minmax(0, 10em) minmax(0, 1fr); gap: 8px 12px; font-size: 15px; }
+.help dt { font-weight: 600; } .help dd { margin: 0; color: var(--muted); }
+.toast { position: fixed; z-index: 2000; left: 50%; transform: translateX(-50%); bottom: calc(var(--sheet-h) + 16px); background: var(--asphalt); color: #fff; padding: 10px 16px; border-radius: 10px; font-weight: 500; box-shadow: var(--shadow); max-width: calc(100% - 32px); text-align: center; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
@@ -273,35 +185,33 @@ button { cursor: pointer; }
     <div class="brand-sign" aria-hidden="true">
       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-6.2-7-11.5A7 7 0 0 1 19 9.5C19 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/></svg>
     </div>
-    <div>
-      <h1>Mapa do Romaneio</h1>
-      <p>Todas as paradas da rota no mapa, antes de sair.</p>
+    <div><h1>Mapa do Romaneio</h1><p>Toque na sua rota e veja onde ficam as entregas.</p></div>
+  </div>
+
+  <div class="empty-start" id="noFile">
+    <strong>Abra o romaneio do dia</strong>
+    <p class="hint">O arquivo .xlsx da Shopee. Ele fica salvo no celular até você abrir outro.</p>
+    <label class="btn btn-primary" for="fileInput">Abrir romaneio</label>
+  </div>
+
+  <div id="hasFile" hidden>
+    <div class="file-card">
+      <svg class="ico" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg>
+      <div class="txt"><strong id="fileTitle">Romaneio</strong><span id="fileSub"></span></div>
+      <label class="btn btn-small" for="fileInput">Trocar</label>
     </div>
   </div>
-
-  <section class="card" aria-labelledby="l1">
-    <span class="step-label" id="l1">1 · Romaneio</span>
-    <label class="file-drop" id="fileDrop" for="fileInput">
-      <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h6"/></svg>
-      <div><strong id="fileTitle">Escolher planilha</strong><span id="fileName">Romaneio da Shopee (.xlsx)</span></div>
-    </label>
-    <input type="file" id="fileInput" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv">
-  </section>
-
-  <section class="card" aria-labelledby="l2">
-    <label class="step-label" id="l2" for="routeCode">2 · Rota</label>
-    <input class="route-input" id="routeCode" placeholder="G-31" list="routeList" autocomplete="off" autocapitalize="characters" spellcheck="false" inputmode="text">
-    <datalist id="routeList"></datalist>
-    <p class="hint" id="routeHint">Digite a gaiola da sua rota (Corridor Cage), como G-31.</p>
-  </section>
+  <input type="file" id="fileInput" class="visually-hidden" accept=".xlsx,.xls,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv">
 
   <p class="error" id="startError" hidden></p>
-  <button class="btn btn-primary" id="goBtn" disabled>Mostrar no mapa</button>
 
-  <div class="recent" id="recentBox" hidden>
-    <span class="step-label">Última rota aberta</span>
-  </div>
-  <button class="btn btn-ghost btn-small" id="demoBtn">Testar com um romaneio de exemplo</button>
+  <section id="routeBox" hidden>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <label class="label" for="routeSearch">Sua rota</label>
+      <input class="search" id="routeSearch" placeholder="Digite: G-31" autocomplete="off" autocapitalize="characters" spellcheck="false">
+      <div class="routes" id="routes" role="list"></div>
+    </div>
+  </section>
 </main>
 
 <!-- ======= Mapa ======= -->
@@ -309,7 +219,7 @@ button { cursor: pointer; }
   <div id="map"></div>
 
   <div class="topbar">
-    <button class="icon-btn" id="backBtn" aria-label="Voltar">
+    <button class="icon-btn" id="backBtn" aria-label="Voltar para as rotas">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
     </button>
     <div class="route-chip">
@@ -318,72 +228,35 @@ button { cursor: pointer; }
       <div class="progress"><i id="progressBar"></i></div>
     </div>
   </div>
-
-  <div class="banner example" id="exampleBanner" hidden>Exemplo com endereços fictícios em Niterói. Abra o seu romaneio para usar de verdade. <u>Fechar</u></div>
   <div class="banner" id="riskBanner" hidden>Toque no mapa no centro da área de risco</div>
 
   <div class="fabs fabs-left">
-    <button class="icon-btn" id="zoomInBtn" aria-label="Aproximar" title="Aproximar">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
-    <button class="icon-btn" id="zoomOutBtn" aria-label="Afastar" title="Afastar">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M5 12h14"/></svg>
-    </button>
+    <button class="icon-btn" id="zoomInBtn" aria-label="Aproximar"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></button>
+    <button class="icon-btn" id="zoomOutBtn" aria-label="Afastar"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
   </div>
-
   <div class="fabs">
-    <button class="icon-btn" id="helpBtn" aria-label="Como usar o mapa" title="Como usar o mapa">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5h.01"/></svg>
-    </button>
-    <button class="icon-btn" id="riskBtn" aria-label="Marcar área de risco" title="Marcar área de risco">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>
-    </button>
-    <button class="icon-btn" id="zonesBtn" aria-label="Áreas de risco salvas" title="Áreas de risco salvas">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>
-    </button>
-    <button class="icon-btn" id="listBtn" aria-label="Mostrar ou esconder a lista" title="Mostrar ou esconder a lista">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>
-    </button>
-    <button class="icon-btn" id="fitBtn" aria-label="Ver todas as paradas" title="Ver todas as paradas">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
-    </button>
-    <button class="icon-btn" id="meBtn" aria-label="Ir para minha posição" title="Ir para minha posição">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7"/></svg>
-    </button>
-    <button class="icon-btn" id="followBtn" aria-label="Seguir minha posição" aria-pressed="false" title="Seguir minha posição">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-8-8 18-2-8z"/></svg>
-    </button>
+    <button class="icon-btn" id="helpBtn" aria-label="Como usar"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14M12 17.5h.01"/></svg></button>
+    <button class="icon-btn" id="riskBtn" aria-label="Áreas de risco"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg></button>
+    <button class="icon-btn" id="listBtn" aria-label="Mostrar ou esconder a lista"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
+    <button class="icon-btn" id="fitBtn" aria-label="Ver a rota inteira"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+    <button class="icon-btn" id="meBtn" aria-label="Seguir minha posição" aria-pressed="false"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7"/></svg></button>
   </div>
 
   <div class="sheet" id="sheet">
     <div class="handle-area" id="handle">
       <div class="handle"></div>
+      <div class="nav-row">
+        <a class="btn btn-go" id="navBtn" href="#" target="_blank" rel="noopener">Google Maps · próximas 10</a>
+      </div>
       <div class="summary" id="summary"></div>
-    </div>
-    <div class="tools">
-      <button class="btn btn-small" id="gmapsBtn">Abrir no Google Maps</button>
-      <button class="btn btn-small" id="optBtn">Otimizar ordem</button>
     </div>
     <div class="list" id="list" role="list"></div>
   </div>
 
-  <!-- Painel: nova área de risco -->
-  <div class="panel" id="zonePanel" hidden>
-    <h2>Nova área de risco</h2>
-    <label for="zoneName">Nome</label>
-    <input type="text" id="zoneName" placeholder="Ex.: Morro do Estado — evitar à noite">
-    <label for="zoneRadius">Raio: <b id="zoneRadiusLabel" class="num">300 m</b></label>
-    <input type="range" id="zoneRadius" min="100" max="1500" step="50" value="300">
-    <div class="row">
-      <button class="btn" id="zoneCancel">Cancelar</button>
-      <button class="btn btn-primary" id="zoneSave">Salvar área</button>
-    </div>
-  </div>
-
-  <!-- Painel: lista de áreas -->
   <div class="panel" id="zonesPanel" hidden>
     <h2>Áreas de risco</h2>
     <p class="hint">Ficam salvas neste celular e valem para todas as rotas. Paradas dentro de uma área ganham a etiqueta <b>Risco</b>.</p>
+    <button class="btn btn-primary" id="zoneNew">Marcar nova área no mapa</button>
     <div id="zonesList"></div>
     <div class="row">
       <button class="btn" id="zonesExport">Exportar</button>
@@ -393,42 +266,42 @@ button { cursor: pointer; }
     <button class="btn" id="zonesClose">Fechar</button>
   </div>
 
-  <!-- Painel: como usar o mapa -->
-  <div class="panel" id="helpPanel" hidden>
-    <h2>Como usar o mapa</h2>
-    <dl class="help">
-      <dt>Arrastar com um dedo</dt><dd>Move o mapa</dd>
-      <dt>Pinça com dois dedos</dt><dd>Aproxima e afasta (ou use + e −)</dd>
-      <dt>Toque duplo</dt><dd>Aproxima naquele ponto</dd>
-      <dt>Tocar num pino</dt><dd>Abre a parada na lista com Waze, Google Maps e ajuste</dd>
-      <dt>Círculo com número</dt><dd>Várias paradas juntas. Toque para aproximar; se estiverem no mesmo prédio, abrem em leque</dd>
-      <dt>Botão seta</dt><dd>Segue sua posição enquanto você dirige. Arrastar o mapa desliga</dd>
-      <dt>Botão mira</dt><dd>Vai até onde você está, uma vez</dd>
-      <dt>Botão quadrado</dt><dd>Mostra a rota inteira</dd>
-      <dt>Botão lista</dt><dd>Esconde ou mostra a lista para ver o mapa maior</dd>
-      <dt>Barra da lista</dt><dd>Arraste para cima ou para baixo, ou toque para trocar o tamanho</dd>
-      <dt>Botão alerta</dt><dd>Marca área de risco: toque nele e depois no mapa</dd>
-      <dt>Ajustar pino</dt><dd>Na parada, toque em Ajustar e arraste o pino até a porta. Fica salvo</dd>
-    </dl>
-    <p class="hint">Cores: verde = pelo número na rua · amarelo = só a rua · vermelho = conferir · roxo = ajustado por você.</p>
-    <button class="btn" id="helpClose">Entendi</button>
+  <div class="panel" id="zonePanel" hidden>
+    <h2>Nova área de risco</h2>
+    <label for="zoneName">Nome</label>
+    <input type="text" id="zoneName" placeholder="Ex.: Morro do Estado, evitar à noite">
+    <label for="zoneRadius">Raio: <b id="zoneRadiusLabel" class="num">300 m</b></label>
+    <input type="range" id="zoneRadius" min="100" max="1500" step="50" value="300">
+    <div class="row"><button class="btn" id="zoneCancel">Cancelar</button><button class="btn btn-primary" id="zoneSave">Salvar</button></div>
   </div>
 
-  <!-- Painel: ajuste de pino -->
   <div class="panel" id="fixPanel" hidden>
     <h2>Ajustar local</h2>
-    <p class="hint" id="fixText">Arraste o pino até a porta certa. O ajuste fica salvo e vale para as próximas rotas com esse endereço.</p>
-    <div class="row">
-      <button class="btn" id="fixCancel">Cancelar</button>
-      <button class="btn btn-primary" id="fixSave">Salvar local</button>
-    </div>
+    <p class="hint" id="fixText">Arraste o pino até a porta certa. Fica salvo para as próximas vezes.</p>
+    <div class="row"><button class="btn" id="fixCancel">Cancelar</button><button class="btn btn-primary" id="fixSave">Salvar local</button></div>
+  </div>
+
+  <div class="panel" id="helpPanel" hidden>
+    <h2>Como usar</h2>
+    <dl class="help">
+      <dt>Botão verde</dt><dd>Abre as próximas 10 paradas pendentes no Google Maps, já em ordem. Marque as entregues e toque de novo para as 10 seguintes.</dd>
+      <dt>Ícone de mapa</dt><dd>Navega até aquela parada no Google Maps, pelo endereço escrito</dd>
+      <dt>Ícone de seta</dt><dd>Abre a parada no Waze</dd>
+      <dt>Arrastar / pinça</dt><dd>Move e dá zoom no mapa (ou use + e −)</dd>
+      <dt>Tocar num pino</dt><dd>Mostra a parada na lista</dd>
+      <dt>Botão mira</dt><dd>Segue sua posição. Arrastar o mapa desliga</dd>
+      <dt>Botão lista</dt><dd>Esconde a lista para ver o mapa maior</dd>
+      <dt>Barra da lista</dt><dd>Arraste para cima ou para baixo</dd>
+      <dt>Ajustar pino</dt><dd>Toque na parada → Ajustar → arraste até a porta. Fica salvo</dd>
+    </dl>
+    <p class="hint">Cores: verde = posição pelo número na rua · amarelo = rua certa, número aproximado · cinza = rua não está no mapa aberto (use o Google Maps) · roxo = ajustado por você.</p>
+    <button class="btn" id="helpClose">Entendi</button>
   </div>
 </section>
 
 <div class="toast" id="toast" hidden role="status"></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
 <script src="core.js"></script>
 <script src="app.js"></script>
 </body>
